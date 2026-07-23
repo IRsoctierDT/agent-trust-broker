@@ -39,6 +39,15 @@ python -m venv .venv && .venv/bin/pip install pytest
 .venv/bin/python -m pytest
 ```
 
+## Demo
+
+An end-to-end narrated run — allow, escalate-on-injection, deny, delegation,
+cascade revocation, and tamper detection on the persisted audit chain:
+
+```bash
+.venv/bin/python -m examples.demo
+```
+
 ## Security invariants
 
 - No role binds `net:egress`; external network access **always** escalates to a human.

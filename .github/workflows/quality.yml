@@ -25,7 +25,7 @@ jobs:
         run: pip install pytest ruff mypy bandit
 
       - name: Everything compiles
-        run: python -m compileall -q atb tests
+        run: python -m compileall -q atb tests examples
 
       - name: Conformance suite (T1-T12)
         run: python -m pytest -q
@@ -34,7 +34,13 @@ jobs:
         run: ruff check .
 
       - name: Static types (strict)
-        run: mypy atb tests
+        run: mypy atb tests examples
+
+      - name: Format check
+        run: ruff format --check .
+
+      - name: Demo runs end to end
+        run: python -m examples.demo
 
       - name: Security static analysis
         run: bandit -r atb -q

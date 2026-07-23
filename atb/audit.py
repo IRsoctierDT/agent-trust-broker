@@ -11,9 +11,27 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 _GENESIS = "sha256:" + "0" * 64
+
+
+@runtime_checkable
+class AuditSink(Protocol):
+    """Anything the policy engine may write decisions to (memory or durable)."""
+
+    def append(self, payload: dict[str, Any]) -> AuditRecord:
+        """Append one record to the chain and return it."""
+        ...  # pragma: no cover - protocol definition
+
+    @property
+    def records(self) -> tuple[AuditRecord, ...]:
+        """Immutable view of the chain."""
+        ...  # pragma: no cover - protocol definition
+
+    def verify_chain(self) -> bool:
+        """Recompute the chain; False means tampering or truncation."""
+        ...  # pragma: no cover - protocol definition
 
 
 @dataclass(frozen=True)

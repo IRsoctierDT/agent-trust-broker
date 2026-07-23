@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
-from atb.audit import AuditLog, AuditRecord
+from atb.audit import AuditLog, AuditRecord, AuditSink
 from atb.catalog import CATALOG, resource_in_scope, scope_grants
 from atb.identity import IdentityAuthority, VerificationError
 
@@ -41,7 +41,7 @@ class PolicyEngine:
     """Zero-Trust reference monitor for the IANUA agent fleet."""
 
     authority: IdentityAuthority
-    log: AuditLog = field(default_factory=AuditLog)
+    log: AuditSink = field(default_factory=AuditLog)
 
     def authorize(
         self,

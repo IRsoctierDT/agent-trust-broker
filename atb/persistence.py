@@ -53,6 +53,15 @@ class JsonlAuditStore:
             path.touch()
         return cls(path=path, log=log)
 
+    @property
+    def records(self) -> tuple[AuditRecord, ...]:
+        """Immutable view of the loaded chain (AuditSink protocol)."""
+        return self.log.records
+
+    def verify_chain(self) -> bool:
+        """Verify the in-memory chain (AuditSink protocol)."""
+        return self.log.verify_chain()
+
     def append(self, payload: dict[str, Any]) -> AuditRecord:
         """Append to the in-memory chain and write through to disk."""
         record = self.log.append(payload)

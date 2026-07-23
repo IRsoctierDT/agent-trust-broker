@@ -125,9 +125,7 @@ def test_t7_delegation_must_attenuate(authority: IdentityAuthority) -> None:
     """T7: delegated scopes outside the target role's binding are rejected."""
     _, orch_token = authority.mint("agent:orchestrator")
     with pytest.raises(DelegationError, match="subset"):
-        authority.mint_delegated(
-            orch_token, "agent:mitre-mapper", frozenset({"tool:report.write"})
-        )
+        authority.mint_delegated(orch_token, "agent:mitre-mapper", frozenset({"tool:report.write"}))
 
 
 def test_t8_delegated_identity_cannot_delegate(authority: IdentityAuthority) -> None:
