@@ -27,6 +27,7 @@ EAODS reference implementation of **PAT-0001 (Zero Trust Service Identity)** and
 | `atb.audit` | Append-only, hash-chained decision log with chain verification |
 | `atb.persistence` | Durable JSONL audit storage; chain re-verified fail-closed on load |
 | `atb.escalation` | Persistent escalation queue; human approve/deny recorded in the chain |
+| `atb.cli` | Operator CLI (`atb pending / approve / deny / verify`) |
 
 Stdlib only. Signing keys are supplied at construction — never hard-coded, never logged.
 
@@ -40,6 +41,33 @@ integrity.
 python -m venv .venv && .venv/bin/pip install pytest
 .venv/bin/python -m pytest
 ```
+
+## Operator CLI
+
+Resolve escalations without writing Python. Install the package
+(`pip install -e .`), point `ATB_AUDIT_CHAIN` at the broker's audit file
+(or pass `--chain`), then:
+
+```bash
+atb pending
+```
+
+```bash
+atb approve ATB-DEC-000123 --reason "known safe intel feed"
+```
+
+```bash
+atb deny ATB-DEC-000123 --reason "unknown destination"
+```
+
+```bash
+atb verify
+```
+
+Approvals are recorded in the hash chain, attributed to `--approver` (default:
+the OS user), require a reason, and remain one-shot and triple-bound. Every
+failure path — missing or tampered chain, unknown ref, double resolution —
+exits non-zero.
 
 ## Demo
 

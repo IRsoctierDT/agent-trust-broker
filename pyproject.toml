@@ -7,6 +7,16 @@ authors = [{ name = "Ivan Rozenblad" }]
 requires-python = ">=3.11"
 license = { text = "MIT" }
 
+[project.scripts]
+atb = "atb.cli:main"
+
+[build-system]
+requires = ["setuptools>=83"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["atb"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

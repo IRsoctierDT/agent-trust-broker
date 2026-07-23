@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: ianua-atb
+Version: 0.1.0
+Summary: Identity issuance and Zero-Trust policy enforcement for the IANUA agent fleet.
+Author: Ivan Rozenblad
+License: MIT
+Requires-Python: >=3.11
+License-File: LICENSE
+Dynamic: license-file
