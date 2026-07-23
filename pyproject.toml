@@ -1,0 +1,26 @@
+# pyproject.toml — IANUA Agent Trust Broker (ATB)
+[project]
+name = "ianua-atb"
+version = "0.1.0"
+description = "Identity issuance and Zero-Trust policy enforcement for the IANUA agent fleet."
+authors = [{ name = "Ivan Rozenblad" }]
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "S"]
+ignore = ["S101"]  # assert is the point of the conformance suite
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
