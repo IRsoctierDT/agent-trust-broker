@@ -25,6 +25,8 @@ EAODS reference implementation of **PAT-0001 (Zero Trust Service Identity)** and
 | `atb.identity` | Mint / verify / revoke; depth-1 attenuating delegation; cascade revocation |
 | `atb.policy` | Deterministic authorize → allow / deny / escalate; always audited |
 | `atb.audit` | Append-only, hash-chained decision log with chain verification |
+| `atb.persistence` | Durable JSONL audit storage; chain re-verified fail-closed on load |
+| `atb.escalation` | Persistent escalation queue; human approve/deny recorded in the chain |
 
 Stdlib only. Signing keys are supplied at construction — never hard-coded, never logged.
 
@@ -55,3 +57,7 @@ cascade revocation, and tamper detection on the persisted audit chain:
 - LLM output is data, never authorization: out-of-scope requests are denied/escalated
   and flagged as security events.
 - Delegation only attenuates, is depth-1, and revocation cascades.
+- Escalations close the loop in the chain: a named human's approve/deny is a
+  chained record, and an approval is **one-shot and triple-bound** — it converts
+  exactly one matching `(subject, action, resource)` escalate into an allow,
+  with the consumption itself recorded. Replay is refused and evidenced.
