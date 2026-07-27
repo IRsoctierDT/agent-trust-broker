@@ -1,0 +1,76 @@
+# .pre-commit-config.yaml — IANUA Agent Trust Broker (ATB)
+# Fast local quality gates that mirror the CI pipeline (AGENTS.md §7-§8) and the
+# .github/workflows/quality.yml gate set.
+#
+# Setup:
+#   pip install pre-commit
+#   pre-commit install
+#   pre-commit install --hook-type pre-push
+#   detect-secrets scan > .secrets.baseline   # one-time, then review & commit
+# Run on everything:
+#   pre-commit run --all-files
+
+minimum_pre_commit_version: "3.7.0"
+default_install_hook_types: [pre-commit, pre-push]
+fail_fast: false
+
+repos:
+  # --- Repo hygiene -------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: detect-private-key        # blocks committed private keys (AGENTS.md §5)
+      - id: debug-statements
+
+  # --- Lint + format (ruff) ----------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff                      # lint; mirrors `ruff check .`
+        args: ["--fix"]
+      - id: ruff-format               # mirrors `ruff format --check .`
+
+  # --- Static type checking (mypy, strict) --------------------------------
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.2
+    hooks:
+      - id: mypy
+        files: ^(atb|tests|examples)/
+        additional_dependencies: []   # add typed stub packages here as deps grow
+
+  # --- Security static analysis (bandit) ---------------------------------
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.10
+    hooks:
+      - id: bandit
+        args: ["-r", "atb"]
+        additional_dependencies: ["bandit[toml]"]
+
+  # --- Secret scanning (detect-secrets) ----------------------------------
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: ^\.secrets\.baseline$
+
+  # --- Tests on push (heavier; not on every commit) ----------------------
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest (T1-T12 conformance suite)
+        entry: python -m pytest
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]
