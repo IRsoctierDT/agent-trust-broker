@@ -1,0 +1,21 @@
+# CODEOWNERS — required reviewers for sensitive areas (AGENTS.md §8).
+# Security-relevant paths require review before merge.
+
+*                       @IRsoctierDT
+
+# Core authority surfaces — identity, policy, audit, escalation, enforcement.
+/atb/                   @IRsoctierDT
+
+# Conformance suite: T1-T12 (and future E-series) prove the trust boundaries hold.
+/tests/security/        @IRsoctierDT
+
+# Design volumes (ATB-01/02/03) and the governing charter.
+/docs/                  @IRsoctierDT
+/AGENTS.md              @IRsoctierDT
+/CLAUDE.md              @IRsoctierDT
+/SECURITY.md            @IRsoctierDT
+
+# CI, supply chain, and repository governance.
+/.github/               @IRsoctierDT
+/.pre-commit-config.yaml @IRsoctierDT
+/pyproject.toml         @IRsoctierDT
