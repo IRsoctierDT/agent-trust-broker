@@ -11,7 +11,7 @@ license = { text = "MIT" }
 atb = "atb.cli:main"
 
 [build-system]
-requires = ["setuptools>=83"]
+requires = ["setuptools>=84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
