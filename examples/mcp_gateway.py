@@ -25,7 +25,10 @@ Configuration (environment; see ``.env.example``):
   Unset: an ephemeral key is generated and identities die with the process.
 - ``ATB_AUDIT_CHAIN`` — path to the durable JSONL audit chain. Unset: the
   chain lives in memory (demo mode). The chain has one writer at a time by
-  design; run the operator CLI when the gateway is not actively appending.
+  design: **stop the gateway before resolving escalations with the operator
+  CLI, then restart it** — the fresh open replays the chain (including the
+  resolution), whereas appending from two processes forks the chain and
+  every subsequent open fails closed.
 
 Security considerations: tokens are read from ``_meta`` and passed only to
 the policy engine — never logged, never echoed. A missing or malformed
@@ -57,7 +60,7 @@ SERVER_INFO = {"name": "ianua-atb-gateway", "version": "0.1.0"}
 
 _PARSE_ERROR = -32700
 _METHOD_NOT_FOUND = -32601
-_INVALID_PARAMS = -32602
+_INTERNAL_ERROR = -32603
 
 
 def _lab_downstream(tool: str, arguments: Mapping[str, Any]) -> object:
@@ -134,7 +137,26 @@ class Gateway:
             arguments=arguments if isinstance(arguments, dict) else {},
             context=_str_mapping(meta.get("atb_context")),
         )
-        outcome = self.pep.mediate(invocation)
+        try:
+            outcome = self.pep.mediate(invocation)
+        except Exception as exc:
+            # The PEP surfaces downstream errors unchanged (the forward was
+            # already authorized and chained). Report it in-band so the
+            # client can distinguish "executed but failed" from "refused" —
+            # never as a parameter error.
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "tool execution failed after the authorization decision: "
+                            f"{type(exc).__name__} (any forward was already audited)"
+                        ),
+                    }
+                ],
+                "isError": True,
+                "_meta": {"atb": {"effect": "error", "reason": "downstream_error"}},
+            }
         atb_meta = {
             "effect": outcome.effect.value,
             "reason": outcome.reason,
@@ -142,7 +164,10 @@ class Gateway:
             "pending_ref": outcome.pending_ref,
         }
         if outcome.effect is Effect.ALLOW:
-            text = json.dumps(outcome.result)
+            try:
+                text = json.dumps(outcome.result)
+            except (TypeError, ValueError):
+                text = "forwarded; downstream result is not JSON-serializable"
         elif outcome.effect is Effect.ESCALATE:
             text = (
                 f"held for human approval — pending ref {outcome.pending_ref}; "
@@ -188,7 +213,7 @@ class Gateway:
             else:
                 return _error(request_id, _METHOD_NOT_FOUND, f"unknown method: {method!r}")
         except Exception as exc:  # one bad request must not kill the session
-            return _error(request_id, _INVALID_PARAMS, f"{type(exc).__name__}: {exc}")
+            return _error(request_id, _INTERNAL_ERROR, f"{type(exc).__name__}: {exc}")
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
@@ -221,6 +246,20 @@ def _build_authority() -> IdentityAuthority:
     return IdentityAuthority(signing_key=key)
 
 
+def _parse_request(line: str) -> dict[str, Any] | None:
+    """Parse one wire line to a request object; None on any hostile input.
+
+    ``RecursionError`` (deeply nested JSON) is caught alongside parse
+    errors: one hostile line must degrade to a parse-error response, never
+    kill the session.
+    """
+    try:
+        request = json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+    return request if isinstance(request, dict) else None
+
+
 def main() -> int:
     """Serve newline-delimited JSON-RPC on stdio until EOF."""
     gateway = Gateway(sink=_build_sink(), authority=_build_authority())
@@ -228,13 +267,9 @@ def main() -> int:
         line = line.strip()
         if not line:
             continue
-        try:
-            request = json.loads(line)
-        except json.JSONDecodeError:
+        request = _parse_request(line)
+        if request is None:
             print(json.dumps(_error(None, _PARSE_ERROR, "parse error")), flush=True)
-            continue
-        if not isinstance(request, dict):
-            print(json.dumps(_error(None, _PARSE_ERROR, "request must be an object")), flush=True)
             continue
         response = gateway.handle(request)
         if response is not None:

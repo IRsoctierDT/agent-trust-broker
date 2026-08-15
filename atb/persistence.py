@@ -36,8 +36,18 @@ class JsonlAuditStore:
             for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                 if not line.strip():
                     continue
-                persisted: dict[str, Any] = json.loads(line)
-                replayed = log.append(persisted["payload"])
+                try:
+                    persisted: dict[str, Any] = json.loads(line)
+                    payload = persisted["payload"]
+                except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                    # A truncated tail (process death mid-append) or a
+                    # schema-damaged line is tampering/corruption evidence,
+                    # not a parse detail — same fail-closed error as a broken
+                    # hash so every caller already handles it.
+                    raise AuditIntegrityError(
+                        f"{path}:{line_number}: malformed or truncated record"
+                    ) from exc
+                replayed = log.append(payload)
                 if (
                     replayed.decision_id != persisted["decision_id"]
                     or replayed.prev_hash != persisted["prev_hash"]

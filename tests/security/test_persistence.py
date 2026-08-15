@@ -59,3 +59,26 @@ def test_reordered_records_fail_closed(tmp_path: Path) -> None:
     path.write_text("\n".join(lines) + "\n")
     with pytest.raises(AuditIntegrityError):
         JsonlAuditStore.open(path)
+
+
+def test_truncated_final_line_fails_closed(tmp_path: Path) -> None:
+    """A half-written tail (process death mid-append) is integrity failure."""
+    path = tmp_path / "audit.jsonl"
+    _seed(path)
+    text = path.read_text()
+    path.write_text(text[: len(text) // 2])  # simulate death mid-append
+    with pytest.raises(AuditIntegrityError, match="malformed or truncated"):
+        JsonlAuditStore.open(path)
+
+
+def test_garbage_line_fails_closed(tmp_path: Path) -> None:
+    """A non-JSON or schema-damaged line is integrity failure, not a traceback."""
+    path = tmp_path / "audit.jsonl"
+    _seed(path)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("not json at all\n")
+    with pytest.raises(AuditIntegrityError, match="malformed or truncated"):
+        JsonlAuditStore.open(path)
+    path.write_text('{"decision_id": "ATB-DEC-000001"}\n')  # valid JSON, missing fields
+    with pytest.raises(AuditIntegrityError, match="malformed or truncated"):
+        JsonlAuditStore.open(path)

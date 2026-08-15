@@ -37,16 +37,33 @@ Why each flag:
 
 The gateway speaks newline-delimited JSON-RPC on stdio (`initialize`,
 `tools/list`, `tools/call`); wire it to an agent runtime with `podman run -i`
-or a systemd/Quadlet unit. Resolve escalations from the host against the same
-volume:
+or a systemd/Quadlet unit.
+
+## Resolving escalations
+
+The chain has **one writer at a time** by design: appending from two
+processes forks it, after which every open fails closed. So the operator
+loop is *stop → resolve → restart* (the gateway replays the chain, including
+the resolution, on startup; the agent's retry then consumes the approval):
 
 ```bash
-podman run --rm -v atb-chain:/var/lib/atb --network=none ianua-atb \
-  python -m atb.cli pending --chain /var/lib/atb/audit-chain.jsonl
+podman stop atb-gateway
 ```
 
-> Note: run the operator CLI while the gateway is idle — the chain has one
-> writer at a time by design.
+```bash
+podman run --rm --entrypoint atb -v atb-chain:/var/lib/atb --network=none ianua-atb \
+  pending --chain /var/lib/atb/audit-chain.jsonl
+```
+
+```bash
+podman run --rm --entrypoint atb -v atb-chain:/var/lib/atb --network=none ianua-atb \
+  approve ATB-DEC-000123 --approver "$USER" --reason "known safe intel feed" \
+  --chain /var/lib/atb/audit-chain.jsonl
+```
+
+Then start the gateway again. (`--entrypoint atb` is required — the image's
+default entrypoint is the gateway, and arguments appended without it would
+just be ignored by the gateway process.)
 
 macOS note: podman runs containers in a Linux VM (`podman machine`); this is
 fine for development, but the deployment target is the Linux lab host.

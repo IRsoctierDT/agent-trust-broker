@@ -68,8 +68,12 @@ asserted property to an enforced one.
   scope, and does not modify the ATB-01 engine or the ATB-02 catalog/bindings.
 - **Fail closed by default.** An unmapped tool, an unverifiable identity, or any error in
   derivation results in denial — never a silent forward.
-- **One decision, one record.** Each mediated call yields exactly one hash-chained audit
-  record (the PDP's), preserving T12. The PEP never double-audits.
+- **One decision, one record.** Each mediated call yields exactly one hash-chained
+  *decision* record — the PDP's for mapped calls, a single PEP-authored enforcement
+  refusal for unmappable ones — preserving T12. Escalating calls additionally append the
+  unchanged Milestone-2 escalation lifecycle records (`escalation_submitted`;
+  `escalation_resolved` / `approval_consumed` on resolution) to the same verifiable
+  chain. The PEP never double-audits a decision.
 - **Transport-agnostic core, SDK at the edge.** The enforcement logic stays stdlib-only in
   `atb/`; the concrete MCP wire binding lives in `examples/`, honoring the package invariant.
 
@@ -149,9 +153,9 @@ authoritative** and must reference only cataloged scopes.
 | `invoke_mitre_mapper` | `agent:mitre-mapper.invoke` | fixed `agent:mitre-mapper` | No |
 | `invoke_threat_intel` | `agent:threat-intel.invoke` | fixed `agent:threat-intel` | No |
 | `invoke_kb` | `agent:kb.invoke` | fixed `agent:kb` | No |
-| `workspace_read` | `fs:workspace.read` | canonicalized path from `path` arg | No |
-| `workspace_write` | `fs:workspace.write` | canonicalized path from `path` arg | No |
-| `http_fetch` | `net:egress` | `host:<host>` from URL host | **Always** |
+| `workspace_read` | `fs:workspace.read` | `path` arg passed unrewritten (PDP requires canonical form) | No |
+| `workspace_write` | `fs:workspace.write` | `path` arg passed unrewritten (PDP requires canonical form) | No |
+| `http_fetch` | `net:egress` | `host:<scheme>://<host>:<port><path>` from URL (query/fragment/userinfo excluded — never chained) | **Always** |
 | `policy_read` | `atb:policy.read` | fixed `atb:policy` | No |
 | `audit_read` | `atb:audit.read` | fixed `atb:audit` | No |
 | `mint_sub_identity` | `atb:identity.mint` | fixed `atb:identity` | No |
@@ -160,8 +164,11 @@ authoritative** and must reference only cataloged scopes.
 
 1. The scope column may only name scopes present in the ATB-02 catalog; a mapping to an
    uncataloged scope fails static validation at import (mirrors T11).
-2. Resource derivation for `fs:*` tools canonicalizes the path *before* the PDP call so the
-   T3 path-traversal denial fires as designed.
+2. Resource derivation for `fs:*` tools passes the path through **unrewritten** (shape
+   validation only): the PDP's T3 gate requires an already-canonical path and denies
+   everything else as a `path_traversal` security event. Normalizing on the caller's
+   behalf would mask traversal attempts from the audit trail; passing the raw path is
+   what makes the T3 denial fire as designed.
 3. There is **no mapping to secrets, keys, or `.env`** material — unrepresentable by design
    (ATB-02 rule 3); such tools must not exist in the map.
 4. A tool that could touch multiple resources is mapped per-argument, not with a wildcard
@@ -200,7 +207,7 @@ boundary; it makes the existing ones binding at runtime:
 |---|---|
 | Agent → Tool (T1) | refusing tool calls whose derived scope is not granted |
 | Agent → RAG (T2) | resource derivation pinned to the exact corpus qualifier |
-| Agent → Filesystem (T3) | path canonicalization before the PDP call |
+| Agent → Filesystem (T3) | paths presented unrewritten; the PDP denies non-canonical paths as traversal |
 | Agent → Agent (T4) | requiring a verifiable token on every invocation |
 | Agent → External host (T5) | mapping all egress tools to `net:egress` (always escalate) |
 | LLM output → Action (T6) | refusing to forward any out-of-scope tool call, flagged security event |
@@ -265,8 +272,8 @@ asserts an enforcement outcome (forward vs. refuse), not merely a decision:
 | E2 | In-scope forward | A mapped, in-scope tool call is authorized `allow` and the downstream callable is invoked exactly once |
 | E3 | Out-of-scope refusal (T6) | An out-of-scope / injected tool call is refused, downstream never called, `security_event` recorded |
 | E4 | Escalation holds (T5) | An egress tool call is refused-until-approved; downstream not called; a pending ref is returned |
-| E5 | Approval closes the loop | Re-invoking with a valid `approval_ref` forwards exactly once (consumes one approval) |
-| E6 | One record per call (T12) | Each mediated call appends exactly one hash-chained audit record; chain re-verifies |
+| E5 | Approval closes the loop | Re-invoking with a valid `approval_ref` forwards exactly once (consumes one approval); a same-host invocation with a different path/port/scheme does **not** consume it and re-escalates |
+| E6 | One record per call (T12) | Each mediated call appends exactly one hash-chained *decision* record (escalating calls add exactly the M2 `escalation_submitted` lifecycle record); chain re-verifies |
 
 A conformance run that skips any row is a failed run.
 
@@ -278,9 +285,10 @@ A conformance run that skips any row is a failed run.
 - [x] PDP/PEP split documented; PEP is inline and delegates every judgment.
 - [x] Tool → action/resource mapping grammar documented; map is closed-world.
 - [x] Draft tool map references only cataloged scopes; secrets remain unrepresentable.
-- [x] `fs:*` resource derivation canonicalizes paths before the PDP call.
+- [x] `fs:*` paths pass through unrewritten; the PDP's T3 gate denies non-canonical paths.
 - [x] Forward / refuse / escalate semantics fail closed on every path.
-- [x] Exactly one hash-chained audit record per mediated call (no double-audit).
+- [x] Exactly one hash-chained decision record per mediated call (no double-audit);
+      escalation lifecycle records are the unchanged M2 design.
 - [x] `atb/` core remains stdlib-only; MCP SDK confined to `examples/`.
 - [x] Enforcement conformance matrix (E1–E6) defined.
 - [x] Human review gate completed.
@@ -289,16 +297,24 @@ A conformance run that skips any row is a failed run.
 
 Maintainer approval of the runtime enforcement design is required before any implementing
 code is written. The review shall verify: complete mediation (no bypass path); the tool map
-is closed-world and references only cataloged scopes; path canonicalization precedes policy
-evaluation; escalation cannot be converted to a forward; exactly one audit record per call;
-the core stays stdlib-only; and that LLM-expressed intent is treated as a request, never as
-authorization.
+is closed-world and references only cataloged scopes; `fs:*` paths reach the PDP
+unrewritten and non-canonical paths are denied as traversal; escalation cannot be
+converted to a forward; exactly one decision record per call; the core stays stdlib-only;
+and that LLM-expressed intent is treated as a request, never as authorization.
 
 **Reviewer:** Ivan Rozenblad (repository maintainer)   **Date:** 2026-08-14   **Decision:** **approve**
 
 > Approval recorded per maintainer directive in the working session of 2026-08-14
 > ("Complete the steps in order", covering the ATB-03 review gate). Implementation of
 > Milestone 3 is authorized against this volume as specified.
+>
+> **Post-implementation amendment (2026-08-14):** after the multi-lens adversarial
+> review of the Milestone-3 implementation, this volume was reconciled with the
+> enforced (and reviewed-as-safer) design: `fs:*` paths pass through unrewritten so
+> T3 fires with evidence; per-call record accounting counts one *decision* record
+> plus the unchanged M2 escalation lifecycle records; egress resources carry a
+> reviewable `scheme://host:port/path` summary the approval is bound to. Same
+> session, same approval basis.
 
 ---
 

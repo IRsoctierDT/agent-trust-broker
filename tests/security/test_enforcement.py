@@ -106,6 +106,7 @@ def test_e1_unmapped_tool_refused_downstream_never_called(
     assert result.security_event is True
     assert downstream.calls == []
     assert len(log.records) == 1
+    assert result.audit_ref == log.records[-1].decision_id
     assert log.records[-1].payload["type"] == "enforcement_refusal"
     assert log.records[-1].payload["tool"] == "drop_tables"
     assert log.verify_chain() is True
@@ -128,6 +129,7 @@ def test_e2_in_scope_call_forwarded_exactly_once(
     assert result.result == "ok:log_read"
     assert downstream.calls == [("log_read", {"name": "auth.jsonl"})]
     assert len(log.records) == 1
+    assert result.audit_ref == log.records[-1].decision_id
     assert log.records[-1].payload["resource"] == "logs/lab/auth.jsonl"
     assert log.verify_chain() is True
 
@@ -137,6 +139,7 @@ def test_e3_out_of_scope_call_refused_security_event(
     authority: IdentityAuthority,
     pep: PolicyEnforcementPoint,
     downstream: RecordingDownstream,
+    log: AuditLog,
 ) -> None:
     """E3 (T6 enforced): an injection-steered out-of-scope call never forwards."""
     _, token = authority.mint("agent:soc-analyst")
@@ -148,6 +151,9 @@ def test_e3_out_of_scope_call_refused_security_event(
     assert result.reason == "scope_not_granted"
     assert result.security_event is True
     assert downstream.calls == []
+    # The security event is on the chain, not merely on the result object.
+    assert log.records[-1].payload["security_event"] is True
+    assert log.records[-1].payload["effect"] == "deny"
 
 
 def test_e3_traversal_name_component_refused_at_derivation(
@@ -202,6 +208,7 @@ def test_e3_non_string_context_refused_at_derivation(
     )
     assert result.forwarded is False
     assert result.reason.startswith("derivation_failed")
+    assert "context" in result.reason  # rejected for the context, not the arguments
     assert downstream.calls == []
 
 
@@ -370,3 +377,159 @@ def test_enforcement_records_persist_and_reverify(
     assert reloaded.verify_chain() is True
     assert len(reloaded.records) == len(store.records)
     assert len(EscalationQueue(log=reloaded).pending()) == 1
+
+
+# ------------------------------------------------------- derivation hardening
+def test_malformed_url_refused_and_chained(
+    authority: IdentityAuthority,
+    pep: PolicyEnforcementPoint,
+    downstream: RecordingDownstream,
+    log: AuditLog,
+) -> None:
+    """A URL the stdlib cannot parse fails closed as a chained refusal."""
+    _, token = authority.mint("agent:soc-analyst")
+    result = pep.mediate(
+        ToolInvocation(token=token, tool="http_fetch", arguments={"url": "http://[::1/x"})
+    )
+    assert result.forwarded is False
+    assert result.reason.startswith("derivation_failed")
+    assert downstream.calls == []
+    assert len(log.records) == 1
+    assert log.records[-1].payload["type"] == "enforcement_refusal"
+    assert log.verify_chain() is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["ftp://intel.example/feed", "https:///no-host", "not a url", "http://h:notaport/x"],
+)
+def test_url_rejection_branches_refuse(
+    authority: IdentityAuthority,
+    pep: PolicyEnforcementPoint,
+    downstream: RecordingDownstream,
+    url: str,
+) -> None:
+    """Non-http(s) schemes, hostless and unparseable URLs all refuse."""
+    _, token = authority.mint("agent:soc-analyst")
+    result = pep.mediate(ToolInvocation(token=token, tool="http_fetch", arguments={"url": url}))
+    assert result.forwarded is False
+    assert result.reason.startswith("derivation_failed")
+    assert downstream.calls == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"name": ""}, {"name": 7}, {"name": "a\x00b"}, {"name": "a..b"}, {"name": ".hidden"}],
+)
+def test_bad_name_arguments_refuse(
+    authority: IdentityAuthority,
+    pep: PolicyEnforcementPoint,
+    downstream: RecordingDownstream,
+    arguments: dict[str, Any],
+) -> None:
+    """Missing, non-string, NUL, dotted-run, and leading-dot names all refuse."""
+    _, token = authority.mint("agent:soc-analyst")
+    result = pep.mediate(ToolInvocation(token=token, tool="log_read", arguments=arguments))
+    assert result.forwarded is False
+    assert result.reason.startswith("derivation_failed")
+    assert downstream.calls == []
+
+
+def test_fixed_resource_allow_path(
+    authority: IdentityAuthority,
+    pep: PolicyEnforcementPoint,
+    downstream: RecordingDownstream,
+    log: AuditLog,
+) -> None:
+    """A fixed-resource tool (corpus_search) forwards for a granted scope."""
+    _, token = authority.mint("agent:soc-analyst")
+    result = pep.mediate(ToolInvocation(token=token, tool="corpus_search"))
+    assert result.forwarded is True
+    assert result.effect is Effect.ALLOW
+    assert log.records[-1].payload["resource"] == "rag:corpus:security"
+
+
+def test_canonical_workspace_path_reaches_scope_check(
+    authority: IdentityAuthority,
+    pep: PolicyEnforcementPoint,
+    downstream: RecordingDownstream,
+) -> None:
+    """A canonical path passes derivation intact; denial is scope, not traversal."""
+    _, token = authority.mint("agent:soc-analyst")  # no role binds fs scopes
+    result = pep.mediate(
+        ToolInvocation(token=token, tool="workspace_read", arguments={"path": "workspace/a.md"})
+    )
+    assert result.forwarded is False
+    assert result.reason == "scope_not_granted"  # not path_traversal: path arrived canonical
+    assert downstream.calls == []
+
+
+# ------------------------------------------------------- approval binding
+def test_e5_egress_approval_bound_to_exact_url(
+    authority: IdentityAuthority,
+    pep: PolicyEnforcementPoint,
+    downstream: RecordingDownstream,
+    queue: EscalationQueue,
+) -> None:
+    """An egress approval covers the reviewed URL summary only — not the host."""
+    _, token = authority.mint("agent:soc-analyst")
+    held = pep.mediate(
+        ToolInvocation(
+            token=token, tool="http_fetch", arguments={"url": "https://intel.example/feed"}
+        )
+    )
+    assert held.effect is Effect.ESCALATE
+    assert queue.pending()[0].resource == "host:https://intel.example:443/feed"
+
+    queue.resolve(held.pending_ref, approver="ivan", approved=True, reason="known safe feed")
+
+    # Same host, different path/port: the approval must NOT be consumable.
+    for url in (
+        "https://intel.example/admin/wipe",
+        "https://intel.example:6379/feed",
+        "http://intel.example/feed",
+    ):
+        other = pep.mediate(
+            ToolInvocation(
+                token=token,
+                tool="http_fetch",
+                arguments={"url": url},
+                context={"approval_ref": held.pending_ref},
+            )
+        )
+        assert other.forwarded is False
+        assert other.effect is Effect.ESCALATE
+    assert downstream.calls == []
+
+    # The exact reviewed URL forwards once; the approval is then consumed.
+    approved = pep.mediate(
+        ToolInvocation(
+            token=token,
+            tool="http_fetch",
+            arguments={"url": "https://intel.example/feed"},
+            context={"approval_ref": held.pending_ref},
+        )
+    )
+    assert approved.forwarded is True
+    assert len(downstream.calls) == 1
+
+
+# ------------------------------------------------------- downstream contract
+def test_downstream_error_surfaced_unchanged(
+    authority: IdentityAuthority,
+    engine: PolicyEngine,
+    queue: EscalationQueue,
+    log: AuditLog,
+) -> None:
+    """A downstream failure propagates unchanged; the decision is already chained."""
+    _, token = authority.mint("agent:soc-analyst")
+
+    def broken_downstream(tool: str, arguments: Mapping[str, Any]) -> str:
+        raise RuntimeError("transport down")
+
+    pep = PolicyEnforcementPoint(engine=engine, queue=queue, downstream=broken_downstream)
+    with pytest.raises(RuntimeError, match="transport down"):
+        pep.mediate(ToolInvocation(token=token, tool="log_read", arguments={"name": "a.jsonl"}))
+    assert len(log.records) == 1  # the allow decision was recorded before the forward
+    assert log.records[-1].payload["effect"] == "allow"
+    assert log.verify_chain() is True

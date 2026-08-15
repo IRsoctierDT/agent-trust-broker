@@ -130,14 +130,31 @@ def _workspace_path(key: str) -> Deriver:
 
 
 def _url_host(key: str) -> Deriver:
-    """Derive ``host:<hostname>`` from an http(s) URL argument."""
+    """Derive a reviewable egress summary from an http(s) URL argument.
+
+    The resource is ``host:<scheme>://<hostname>:<port><path>`` — exactly
+    what the approving human sees in ``atb pending``, and exactly what the
+    one-shot approval is triple-bound to, so an approval cannot be spent on
+    a different path, port, or scheme at the same host. Query, fragment,
+    and userinfo are excluded by construction: they may carry secrets and
+    must never enter the audit chain. An unparseable URL (including the
+    stdlib's ``ValueError`` on malformed IPv6 / ports) fails closed as a
+    derivation error — refused and chained, never an unhandled exception.
+    """
 
     def derive(arguments: Mapping[str, Any]) -> str:
         raw = _require_str(arguments, key)
-        parts = urlsplit(raw)
-        if parts.scheme not in ("http", "https") or not parts.hostname:
+        try:
+            parts = urlsplit(raw)
+            hostname = parts.hostname
+            port = parts.port
+        except ValueError as exc:
+            raise DerivationError(f"argument {key!r} is not a parseable URL") from exc
+        if parts.scheme not in ("http", "https") or not hostname:
             raise DerivationError(f"argument {key!r} must be an http(s) URL with a host")
-        return f"host:{parts.hostname}"
+        effective_port = port if port is not None else (443 if parts.scheme == "https" else 80)
+        path = parts.path or "/"
+        return f"host:{parts.scheme}://{hostname}:{effective_port}{path}"
 
     return derive
 
