@@ -301,8 +301,12 @@ authorizations) also withholds: content stays quarantined, nothing is submitted.
 
 ```python
 # atb/catalog.py — one new scope; no existing entry changes
-ScopeSpec("atb:response.release", Risk.CRITICAL, escalates=True,
-          resource_patterns=("quarantine:sha256:*",))
+ScopeSpec(
+    "atb:response.release",
+    Risk.CRITICAL,
+    escalates=True,
+    resource_patterns=("quarantine:sha256:*",),
+)
 ```
 
 - **Bound by no role, ever** (the `net:egress` precedent): the scope exists purely to
