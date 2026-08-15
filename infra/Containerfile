@@ -1,0 +1,31 @@
+# IANUA Agent Trust Broker — PEP gateway container (rootless podman target).
+#
+# Build:  podman build -t ianua-atb -f infra/Containerfile .
+# Run:    see infra/README.md — read-only rootfs, no network, one writable
+#         volume for the audit chain. The safe configuration is the default.
+
+FROM python:3.12-slim
+
+# Non-root by default (least privilege); rootless podman maps this UID again.
+RUN useradd --system --uid 10001 --no-create-home atb \
+    && mkdir -p /var/lib/atb \
+    && chown atb:atb /var/lib/atb
+
+WORKDIR /app
+COPY pyproject.toml README.md LICENSE ./
+COPY atb/ atb/
+COPY examples/ examples/
+RUN pip install --no-cache-dir --no-compile . \
+    && pip cache purge || true
+
+USER 10001
+
+# Durable audit chain lives on the mounted volume; operator CLI reads the same
+# file. ATB_SIGNING_KEY is injected at run time — never baked into the image.
+ENV ATB_AUDIT_CHAIN=/var/lib/atb/audit-chain.jsonl \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+VOLUME ["/var/lib/atb"]
+
+ENTRYPOINT ["python", "-m", "examples.mcp_gateway"]
