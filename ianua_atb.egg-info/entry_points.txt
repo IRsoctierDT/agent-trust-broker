@@ -1,2 +1,0 @@
-[console_scripts]
-atb = atb.cli:main
