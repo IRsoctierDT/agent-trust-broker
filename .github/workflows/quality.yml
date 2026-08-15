@@ -22,13 +22,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install gate tooling
-        run: pip install pytest ruff mypy bandit
+        run: pip install pytest pytest-cov ruff mypy bandit pip-audit "detect-secrets==1.5.0"
 
       - name: Everything compiles
         run: python -m compileall -q atb tests examples
 
-      - name: Conformance suite (T1-T12)
-        run: python -m pytest -q
+      - name: Conformance suite (T1-T12) with coverage gate
+        run: python -m pytest -q --cov=atb --cov-report=term-missing --cov-fail-under=85
 
       - name: Lint
         run: ruff check .
@@ -44,6 +44,12 @@ jobs:
 
       - name: Security static analysis
         run: bandit -r atb -q
+
+      - name: Dependency vulnerability scan (SCA)
+        run: pip-audit
+
+      - name: Secret scan against baseline
+        run: git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
 
       - name: Detect prohibited secret-like files
         shell: bash
