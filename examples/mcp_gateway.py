@@ -29,6 +29,13 @@ Configuration (environment; see ``.env.example``):
   CLI, then restart it** — the fresh open replays the chain (including the
   resolution), whereas appending from two processes forks the chain and
   every subsequent open fails closed.
+- ``ATB_QUARANTINE_DIR`` — directory for withheld response payloads
+  (ATB-04). Required when ``ATB_AUDIT_CHAIN`` is set; must lie outside
+  ``workspace/``. Unset in demo mode: an in-memory store is used.
+- ``ATB_SCREEN_MAX_BYTES`` / ``ATB_QUARANTINE_MAX_BYTES`` /
+  ``ATB_QUARANTINE_BUDGET_BYTES`` — screening and quarantine bounds; all
+  parsed fail-closed (an invalid value refuses to start). Screening itself
+  has **no off switch**: disabling it is a code change through review.
 
 Security considerations: tokens are read from ``_meta`` and passed only to
 the policy engine — never logged, never echoed. A missing or malformed
@@ -39,6 +46,7 @@ deployment mints identities out of band and removes it.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import secrets
@@ -54,6 +62,15 @@ from atb.escalation import EscalationQueue
 from atb.identity import IdentityAuthority
 from atb.persistence import AuditIntegrityError, JsonlAuditStore
 from atb.policy import Effect, PolicyEngine
+from atb.screening import (
+    DEFAULT_QUARANTINE_BUDGET_BYTES,
+    DEFAULT_QUARANTINE_MAX_BYTES,
+    DEFAULT_SCREEN_MAX_BYTES,
+    FileQuarantineStore,
+    MemoryQuarantineStore,
+    QuarantineStore,
+    ResponseScreener,
+)
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_INFO = {"name": "ianua-atb-gateway", "version": "0.1.0"}
@@ -96,12 +113,22 @@ def _dict_or_empty(value: object) -> dict[str, Any]:
 class Gateway:
     """One PEP-mediated MCP session over newline-delimited JSON-RPC."""
 
-    def __init__(self, sink: AuditSink, authority: IdentityAuthority) -> None:
+    def __init__(
+        self,
+        sink: AuditSink,
+        authority: IdentityAuthority,
+        screener: ResponseScreener | None = None,
+        quarantine: QuarantineStore | None = None,
+    ) -> None:
         self.authority = authority
         self.queue = EscalationQueue(log=sink)
         engine = PolicyEngine(authority=authority, log=sink, approvals=self.queue)
         self.pep = PolicyEnforcementPoint(
-            engine=engine, queue=self.queue, downstream=_lab_downstream
+            engine=engine,
+            queue=self.queue,
+            downstream=_lab_downstream,
+            screener=screener if screener is not None else ResponseScreener(),
+            quarantine=quarantine if quarantine is not None else MemoryQuarantineStore(),
         )
 
     # ------------------------------------------------------------ methods
@@ -141,16 +168,18 @@ class Gateway:
             outcome = self.pep.mediate(invocation)
         except Exception as exc:
             # The PEP surfaces downstream errors unchanged (the forward was
-            # already authorized and chained). Report it in-band so the
-            # client can distinguish "executed but failed" from "refused" —
-            # never as a parameter error.
+            # already authorized and chained). Report it in-band with the
+            # FIXED token only — an exception class name or message is
+            # downstream-controlled text riding the transport path (ATB-04
+            # hardening). Detail goes to stderr for the operator.
+            print(f"downstream error: {type(exc).__name__}: {exc}", file=sys.stderr)
             return {
                 "content": [
                     {
                         "type": "text",
                         "text": (
-                            "tool execution failed after the authorization decision: "
-                            f"{type(exc).__name__} (any forward was already audited)"
+                            "tool execution failed after the authorization decision "
+                            "(any forward was already audited)"
                         ),
                     }
                 ],
@@ -163,11 +192,30 @@ class Gateway:
             "audit_ref": outcome.audit_ref,
             "pending_ref": outcome.pending_ref,
         }
+        if outcome.quarantine_digest:
+            # Releasable withhold: the agent needs the digest to request
+            # release later; rule ids are deliberately absent (evidence is
+            # operator-facing, never evasion feedback).
+            atb_meta["quarantine_digest"] = outcome.quarantine_digest
+            atb_meta["screen_ruleset"] = self.pep.screener.version
         if outcome.effect is Effect.ALLOW:
-            try:
-                text = json.dumps(outcome.result)
-            except (TypeError, ValueError):
-                text = "forwarded; downstream result is not JSON-serializable"
+            if isinstance(outcome.result, (bytes, bytearray)):
+                # Released binary content (a human-approved undecodable blob):
+                # deliver byte-exact via base64 rather than lossy decoding —
+                # the digest already bound the approval to these exact bytes.
+                text = json.dumps(
+                    {"encoding": "base64", "data": base64.b64encode(outcome.result).decode("ascii")}
+                )
+            else:
+                try:
+                    text = json.dumps(outcome.result)
+                except (TypeError, ValueError):
+                    text = "downstream result is not JSON-serializable"
+        elif outcome.effect is Effect.ESCALATE and outcome.quarantine_digest:
+            text = (
+                f"response withheld pending human review — pending ref {outcome.pending_ref}; "
+                f"an operator resolves it with: atb approve {outcome.pending_ref} --reason ..."
+            )
         elif outcome.effect is Effect.ESCALATE:
             text = (
                 f"held for human approval — pending ref {outcome.pending_ref}; "
@@ -177,7 +225,9 @@ class Gateway:
             text = f"refused: {outcome.reason} (audit {outcome.audit_ref})"
         return {
             "content": [{"type": "text", "text": text}],
-            "isError": not outcome.forwarded,
+            # A withheld response is truthfully forwarded=True yet must
+            # present as an error to the client: key on the effect (ATB-04).
+            "isError": outcome.effect is not Effect.ALLOW,
             "_meta": {"atb": atb_meta},
         }
 
@@ -213,7 +263,10 @@ class Gateway:
             else:
                 return _error(request_id, _METHOD_NOT_FOUND, f"unknown method: {method!r}")
         except Exception as exc:  # one bad request must not kill the session
-            return _error(request_id, _INTERNAL_ERROR, f"{type(exc).__name__}: {exc}")
+            # Fixed token only: exception text may carry downstream-controlled
+            # content (ATB-04 hardening). Detail goes to stderr.
+            print(f"internal error: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return _error(request_id, _INTERNAL_ERROR, "internal_error")
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
@@ -246,6 +299,75 @@ def _build_authority() -> IdentityAuthority:
     return IdentityAuthority(signing_key=key)
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    """Parse a positive-integer knob fail-closed: invalid is a startup error."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"error: {name} must be a positive integer") from exc
+    if value <= 0:
+        raise SystemExit(f"error: {name} must be a positive integer")
+    return value
+
+
+def _build_screener() -> ResponseScreener:
+    """Screening caps from the environment; screening itself has no off switch."""
+    return ResponseScreener(
+        max_scan_bytes=_positive_int_env("ATB_SCREEN_MAX_BYTES", DEFAULT_SCREEN_MAX_BYTES),
+        max_blob_bytes=_positive_int_env("ATB_QUARANTINE_MAX_BYTES", DEFAULT_QUARANTINE_MAX_BYTES),
+    )
+
+
+def _filesystem_resource_roots() -> dict[str, Path]:
+    """Resolved root directory of every path-shaped catalog resource pattern.
+
+    A filesystem-path pattern (e.g. ``logs/lab/*``, ``reports/*``,
+    ``workspace/*``) roots a directory a granted ``fs``/``tool`` scope could
+    read; scheme-prefixed patterns (``rag:``, ``agent:``, ``host:``,
+    ``quarantine:``, ``atb:``) name no path and are skipped. The quarantine
+    store must sit outside all of them, or a release-loop bypass exists.
+    """
+    roots: dict[str, Path] = {}
+    for spec in CATALOG.values():
+        for pattern in spec.resource_patterns:
+            head = pattern.split("/", 1)[0].split("*", 1)[0]
+            if not head or ":" in head:
+                continue  # scheme-prefixed or wildcard-rooted: not a fs path
+            prefix = pattern.split("*", 1)[0].rstrip("/")
+            roots[pattern] = (Path.cwd() / prefix).resolve()
+    return roots
+
+
+def _build_quarantine() -> QuarantineStore:
+    """Quarantine store from ``ATB_QUARANTINE_DIR``; fail closed on misuse.
+
+    A durable chain requires a durable quarantine — approvals recorded in a
+    durable chain must not reference content that dies with the process.
+    The directory must lie outside every path-shaped catalog resource
+    pattern so no ``fs``/``tool`` scope can ever cover it (release-loop
+    bypass).
+    """
+    raw = os.environ.get("ATB_QUARANTINE_DIR", "").strip()
+    budget = _positive_int_env("ATB_QUARANTINE_BUDGET_BYTES", DEFAULT_QUARANTINE_BUDGET_BYTES)
+    if not raw:
+        if os.environ.get("ATB_AUDIT_CHAIN", "").strip():
+            raise SystemExit(
+                "error: ATB_QUARANTINE_DIR is required when ATB_AUDIT_CHAIN is set "
+                "(a durable chain needs a durable quarantine)"
+            )
+        return MemoryQuarantineStore(budget_bytes=budget)
+    root = Path(raw).resolve()
+    for pattern, reachable in _filesystem_resource_roots().items():
+        if root == reachable or reachable in root.parents:
+            raise SystemExit(
+                f"error: ATB_QUARANTINE_DIR must lie outside catalog resource {pattern!r}"
+            )
+    return FileQuarantineStore(root=root, budget_bytes=budget)
+
+
 def _parse_request(line: str) -> dict[str, Any] | None:
     """Parse one wire line to a request object; None on any hostile input.
 
@@ -262,7 +384,12 @@ def _parse_request(line: str) -> dict[str, Any] | None:
 
 def main() -> int:
     """Serve newline-delimited JSON-RPC on stdio until EOF."""
-    gateway = Gateway(sink=_build_sink(), authority=_build_authority())
+    gateway = Gateway(
+        sink=_build_sink(),
+        authority=_build_authority(),
+        screener=_build_screener(),
+        quarantine=_build_quarantine(),
+    )
     for line in sys.stdin:
         line = line.strip()
         if not line:

@@ -43,6 +43,7 @@ _SPECS: tuple[ScopeSpec, ...] = (
     ScopeSpec("fs:workspace.read", Risk.LOW, False, ("workspace/*",)),
     ScopeSpec("fs:workspace.write", Risk.MEDIUM, False, ("workspace/*",)),
     ScopeSpec("net:egress", Risk.CRITICAL, True, ("host:*",)),
+    ScopeSpec("atb:response.release", Risk.CRITICAL, True, ("quarantine:sha256:*",)),
     ScopeSpec("atb:policy.read", Risk.LOW, False, ("atb:policy",)),
     ScopeSpec("atb:audit.read", Risk.MEDIUM, False, ("atb:audit",)),
     ScopeSpec("atb:identity.mint", Risk.HIGH, False, ("atb:identity",)),

@@ -16,6 +16,7 @@ EAODS reference implementation of **PAT-0001 (Zero Trust Service Identity)** and
 | [ATB-01](docs/IANUA-ATB-v0.1-Identity-and-Policy-Broker.md) | Identity issuance, policy evaluation, escalation, audit model |
 | [ATB-02](docs/IANUA-ATB-v0.1-Scope-Catalog-and-Delegation-Model.md) | Scope catalog, role bindings, delegation, conformance matrix |
 | [ATB-03](docs/IANUA-ATB-v0.1-Runtime-Enforcement-Point.md) | Runtime enforcement point (PEP), tool-call mediation, closed-world tool map |
+| [ATB-04](docs/IANUA-ATB-v0.1-Response-Screening-and-Quarantine.md) | Tool-response screening, quarantine, human release loop (screening as input, never authority) |
 
 ## Package
 
@@ -28,8 +29,9 @@ EAODS reference implementation of **PAT-0001 (Zero Trust Service Identity)** and
 | `atb.audit` | Append-only, hash-chained decision log with chain verification |
 | `atb.persistence` | Durable JSONL audit storage; chain re-verified fail-closed on load |
 | `atb.escalation` | Persistent escalation queue; human approve/deny recorded in the chain |
-| `atb.enforcement` | ATB-03 PEP: closed-world tool map; forward / refuse / escalate mediation |
-| `atb.cli` | Operator CLI (`atb pending / approve / deny / verify`) |
+| `atb.enforcement` | ATB-03 PEP: closed-world tool map; forward / screen / refuse / escalate mediation |
+| `atb.screening` | ATB-04 response screener: versioned closed-world ruleset; content-addressed quarantine stores |
+| `atb.cli` | Operator CLI (`atb pending / show / approve / deny / verify / screen-stats / quarantine`) |
 
 Stdlib only. Signing keys are supplied at construction — never hard-coded, never logged.
 
@@ -39,7 +41,9 @@ Stdlib only. Signing keys are supplied at construction — never hard-coded, nev
 one test per trust boundary, each asserting a denial, an escalation, or chain
 integrity. `tests/security/test_enforcement.py` adds the ATB-03 **E1–E6
 enforcement matrix** — each row asserting a forward-vs-refuse outcome, not
-merely a decision.
+merely a decision. `tests/security/test_screening.py` adds the ATB-04
+**S1–S19 screening matrix** — each row asserting a withhold, a release-loop
+property, or an exact record count, never merely a verdict.
 
 ```bash
 python -m venv .venv && .venv/bin/pip install pytest
@@ -103,3 +107,8 @@ lives in [`infra/`](infra/README.md).
   chained record, and an approval is **one-shot and triple-bound** — it converts
   exactly one matching `(subject, action, resource)` escalate into an allow,
   with the consumption itself recorded. Replay is refused and evidenced.
+- Tool responses are screened before relay (ATB-04): a flagged response is
+  **withheld and quarantined**, never annotated-and-delivered; release requires
+  a named human approval digest-bound to the exact reviewed bytes. Screening is
+  an input to a policy decision, never authority — verdicts only tighten, a
+  clean verdict proves nothing, and there is **no screening off-switch**.
