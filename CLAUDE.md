@@ -11,7 +11,7 @@
 > | **Document** | Agent Operating Charter |
 > | **Status** | Authoritative — supersedes ad-hoc instructions |
 > | **Owner** | Repository maintainer (human) |
-> | **Companion docs** | [`DESIGN.md`](./DESIGN.md), `SECURITY.md`, `CONTRIBUTING.md` |
+> | **Companion docs** | Design volumes [ATB-01](./docs/IANUA-ATB-v0.1-Identity-and-Policy-Broker.md) / [ATB-02](./docs/IANUA-ATB-v0.1-Scope-Catalog-and-Delegation-Model.md) / [ATB-03](./docs/IANUA-ATB-v0.1-Runtime-Enforcement-Point.md); `SECURITY.md`, `CONTRIBUTING.md` (planned) |
 > | **Review cadence** | Re-read on every session start; revise on architecture change |
 
 ---
@@ -46,8 +46,9 @@ state, in its working notes, that it has done so:
 
 1. **Inspect repository structure** — enumerate the tree, identify the affected module(s),
    and confirm the change belongs where you intend to put it (see §4).
-2. **Read [`DESIGN.md`](./DESIGN.md)** — understand the intended architecture, data flows,
-   and the trust boundaries you may be crossing.
+2. **Read the design volumes** (`docs/IANUA-ATB-v0.1-*.md`, ATB-01 through ATB-03) —
+   understand the intended architecture, data flows, and the trust boundaries you may be
+   crossing.
 3. **Read this file (`AGENTS.md`) in full** — the rules below are binding.
 4. **Read the nearest local context** — any `README.md`, module docstring, or `AGENTS.md`
    override in the subdirectory you are editing. **Deeper files win** on conflicts.
@@ -59,7 +60,7 @@ state, in its working notes, that it has done so:
 7. **Confirm scope** — if the requested change is ambiguous, exceeds the stated task, or
    would touch a security boundary (§5), **stop and ask the human** before proceeding.
 
-> **Fail-closed rule:** if any pre-flight step cannot be completed (missing `DESIGN.md`,
+> **Fail-closed rule:** if any pre-flight step cannot be completed (missing design volume,
 > unreadable module, unclear ownership), **do not guess** — halt and report.
 
 ---
@@ -91,37 +92,30 @@ Cross-cutting principles that apply to **every** change:
 ## 4. Repository Structure & Conventions
 
 The repository follows a predictable layout so that both humans and agents can locate
-responsibility quickly. Treat this as the canonical map; `DESIGN.md` holds the detailed
-rationale.
+responsibility quickly. Treat this as the canonical map; the design volumes under `docs/`
+hold the detailed rationale.
 
 ```
 agent-trust-broker/
 ├── AGENTS.md                  # This charter (source of truth for agents)
-├── CLAUDE.md                  # Symlink/copy of AGENTS.md for Claude-based agents
-├── DESIGN.md                  # Architecture, data flows, trust boundaries, decisions
-├── SECURITY.md                # Vulnerability reporting & security policy
-├── CONTRIBUTING.md            # Human + agent contribution workflow
+├── CLAUDE.md                  # Copy of AGENTS.md for Claude-based agents
 ├── README.md                  # Project overview & quickstart
-├── pyproject.toml             # Tooling config: ruff, mypy, pytest, coverage, bandit
+├── pyproject.toml             # Tooling config: ruff, mypy, pytest, bandit
 ├── .pre-commit-config.yaml    # Local quality gates (mirror of CI)
 ├── .env.example               # Documented config keys — NEVER real secrets
-├── agents/                    # Agent definitions, orchestration, tool wiring
-│   ├── __init__.py
-│   ├── roles/                 # Role specs (planner, builder, reviewer, security)
-│   ├── tools/                 # Tool adapters; each validates its own input
-│   └── policies/              # Guardrails, allow/deny lists, approval logic
-├── scripts/                   # Operational & maintenance scripts (CLI entrypoints)
-├── rag/                       # Ingestion, chunking, embedding, retrieval
-├── mcp/                       # MCP servers exposed to agents
-├── detections/                # Detection-engineering content (lab-scoped only)
-├── infra/                     # IaC, container/compose, deployment manifests
-├── docs/                      # Long-form documentation & runbooks
-├── tests/                     # pytest suite (unit, integration, security)
-│   ├── unit/
-│   ├── integration/
-│   └── security/              # Authz, input-validation, injection, secret-leak tests
-└── data/                      # Local/lab data ONLY — gitignored; never client/PII
+├── atb/                       # The broker: catalog, bindings, identity, policy, audit,
+│                              #   persistence, escalation, enforcement (PEP), cli
+├── docs/                      # Design volumes (ATB-01..ATB-03), runbooks, archive
+├── examples/                  # Edge adapters & demos (MCP gateway, end-to-end demo)
+├── infra/                     # Container recipe (rootless podman) & deployment notes
+├── tests/
+│   └── security/              # T1-T12 + E1-E6 conformance, authz, injection tests
+└── .github/                   # CI quality gates, CodeQL, dependabot, PR/issue templates
 ```
+
+Planned as the project grows (create through a reviewed PR, not ad hoc): `rag/`, `mcp/`,
+`detections/`, `scripts/`, `data/` (gitignored, lab-only), `tests/unit/`,
+`tests/integration/`, `SECURITY.md`, `CONTRIBUTING.md`.
 
 **Conventions:**
 
@@ -217,8 +211,9 @@ fix before moving on:
 5. **Poor input validation** — untyped boundaries, missing schema validation, trust of
    external/LLM-supplied data.
 6. **Broken tests** — failing, flaky, skipped, or missing coverage for new logic.
-7. **Incomplete documentation** — undocumented public surface, stale README/DESIGN.
-8. **Violations of `DESIGN.md`** — architectural drift, boundary erosion, naming breakage.
+7. **Incomplete documentation** — undocumented public surface, stale README/design volumes.
+8. **Violations of the design volumes** (`docs/IANUA-ATB-v0.1-*.md`) — architectural
+   drift, boundary erosion, naming breakage.
 
 ### 6.2 Task Lifecycle & Definition of Done
 
@@ -231,7 +226,7 @@ A task is **done** only when **all** of the following hold:
 - [ ] New/changed logic has tests, including a `tests/security` case where a boundary is
       involved.
 - [ ] **All required checks (§7) pass locally.**
-- [ ] Public surface is documented; `DESIGN.md` updated if architecture changed.
+- [ ] Public surface is documented; the design volumes updated if architecture changed.
 - [ ] No secrets, PII, or sensitive data added anywhere.
 - [ ] Summary states what changed, why, residual risks, and rollback.
 - [ ] Any approval gate (§5.1) that was hit has a recorded human approval.
@@ -242,7 +237,7 @@ note — **never** marked done.
 ### 6.3 Escalation
 
 Escalate to the human (do not improvise) when: a security boundary is implicated; the plan
-requires an approval gate; `DESIGN.md` is missing or contradicts the request; required
+requires an approval gate; a design volume is missing or contradicts the request; required
 checks reveal a defect you cannot safely fix within scope; or the request itself appears to
 ask for prohibited behavior.
 
@@ -263,11 +258,11 @@ python -m pytest
 # 3. Lint & style
 ruff check .
 
-# 4. Static type checking
-mypy agents scripts tests
+# 4. Static type checking (strict per pyproject.toml)
+mypy atb tests examples
 
 # 5. Security static analysis (SAST)
-bandit -r agents scripts
+bandit -r atb
 ```
 
 ### 7.1 Extended gate (run when the change warrants it)
@@ -277,7 +272,7 @@ bandit -r agents scripts
 ruff format --check .
 
 # Coverage threshold — new logic must not lower it
-python -m pytest --cov=agents --cov=scripts --cov-report=term-missing --cov-fail-under=85
+python -m pytest --cov=atb --cov-report=term-missing --cov-fail-under=85
 
 # Dependency vulnerability scan (SCA)
 pip-audit
@@ -345,7 +340,7 @@ requirements, and flag when professional legal/financial review is advisable.
 ## 10. Quick Reference Card
 
 ```
-BEFORE YOU EDIT:   inspect tree → read DESIGN.md → read AGENTS.md → read local context
+BEFORE YOU EDIT:   inspect tree → read docs/ design volumes → read AGENTS.md → read local context
 WHILE YOU EDIT:    least privilege · secure defaults · controls stay visible · types + docs
 NEVER:             hard-code secrets · weaken controls · attack 3rd parties · exfiltrate data
 ASK FIRST (gate):  destructive · external network · deploy · new dependency · secrets

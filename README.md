@@ -15,6 +15,7 @@ EAODS reference implementation of **PAT-0001 (Zero Trust Service Identity)** and
 |---|---|
 | [ATB-01](docs/IANUA-ATB-v0.1-Identity-and-Policy-Broker.md) | Identity issuance, policy evaluation, escalation, audit model |
 | [ATB-02](docs/IANUA-ATB-v0.1-Scope-Catalog-and-Delegation-Model.md) | Scope catalog, role bindings, delegation, conformance matrix |
+| [ATB-03](docs/IANUA-ATB-v0.1-Runtime-Enforcement-Point.md) | Runtime enforcement point (PEP), tool-call mediation, closed-world tool map |
 
 ## Package
 
@@ -27,6 +28,7 @@ EAODS reference implementation of **PAT-0001 (Zero Trust Service Identity)** and
 | `atb.audit` | Append-only, hash-chained decision log with chain verification |
 | `atb.persistence` | Durable JSONL audit storage; chain re-verified fail-closed on load |
 | `atb.escalation` | Persistent escalation queue; human approve/deny recorded in the chain |
+| `atb.enforcement` | ATB-03 PEP: closed-world tool map; forward / refuse / escalate mediation |
 | `atb.cli` | Operator CLI (`atb pending / approve / deny / verify`) |
 
 Stdlib only. Signing keys are supplied at construction — never hard-coded, never logged.
@@ -35,7 +37,9 @@ Stdlib only. Signing keys are supplied at construction — never hard-coded, nev
 
 `tests/security/test_conformance.py` implements the ATB-02 **T1–T12 matrix** —
 one test per trust boundary, each asserting a denial, an escalation, or chain
-integrity.
+integrity. `tests/security/test_enforcement.py` adds the ATB-03 **E1–E6
+enforcement matrix** — each row asserting a forward-vs-refuse outcome, not
+merely a decision.
 
 ```bash
 python -m venv .venv && .venv/bin/pip install pytest
@@ -77,6 +81,16 @@ cascade revocation, and tamper detection on the persisted audit chain:
 ```bash
 .venv/bin/python -m examples.demo
 ```
+
+## Enforcement gateway
+
+`examples/mcp_gateway.py` puts the ATB-03 PEP on the wire: an MCP-shaped
+JSON-RPC stdio server whose every `tools/call` is mediated before anything
+executes — allowed calls forward, denials return the audit ref, escalations
+land in the same queue `atb approve` resolves. Stdlib only; configuration via
+`ATB_AUDIT_CHAIN` / `ATB_SIGNING_KEY` (see `.env.example`). A rootless podman
+recipe (read-only rootfs, `--network=none`, one writable volume for the chain)
+lives in [`infra/`](infra/README.md).
 
 ## Security invariants
 

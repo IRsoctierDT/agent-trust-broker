@@ -13,8 +13,10 @@ required reason, no double resolution).
 
 Security considerations: the approver defaults to the operating-system user
 and is recorded in the chain — pass ``--approver`` to attribute explicitly.
-The chain has one writer at a time by design; run this CLI when the broker
-process is not actively appending.
+The chain has one writer at a time by design: **stop the broker/gateway
+process before approving or denying, then restart it** — it replays the
+chain (including the resolution) on open. Appending from two processes
+forks the chain, after which every open fails closed.
 """
 
 from __future__ import annotations
