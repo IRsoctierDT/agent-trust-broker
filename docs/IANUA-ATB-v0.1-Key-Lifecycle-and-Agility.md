@@ -59,11 +59,15 @@ history is chained (tamper-evident, travels with the evidence) while its
 material lives only behind a non-secret reference resolved from operator
 configuration. Two facts make the whole design tractable:
 
-> **Keys authenticate origin; they do not protect chain integrity.** The record
-> hash chain is unkeyed sha256 and stays that way. Therefore **no key
-> compromise, at any epoch, ever makes a record unverifiable** — it makes
-> *provenance claims* untrusted. Compromise is an attribution problem, not an
-> integrity problem, and that asymmetry is the entire response plan.
+> **No key compromise ever makes a record unverifiable.** The record hash chain
+> is unkeyed sha256 and stays that way, so the *evidence* survives every key
+> event — nothing is ever re-signed, because nothing may ever be re-written.
+> But the split is sharper than "keys are only about attribution": an unkeyed
+> chain is fully recomputable, so on-box integrity against an adversary with
+> write access to the volume rests entirely on the keyed seals (ATB-05's own
+> truncate-and-forge residual). Therefore **losing an `identity_sign` key is an
+> attribution event; losing a `chain_seal` key is an integrity event for the
+> on-box copy** — the off-box anchor and archive digests are what bound it.
 
 > **HMAC is symmetric, so a verifier can forge.** With stdlib-only crypto there
 > is no third-party non-repudiation: anyone who can *check* a seal can *mint*
@@ -136,11 +140,17 @@ Epoch `000000` is reserved for the adopted legacy key.
 **Fingerprint** — the non-secret binding commitment:
 
 ```
-fpr = "fpr-sha256-128:" + sha256(b"atb-key-fingerprint-v1\n" + purpose + b"\n" + key).hexdigest()[:32]
+fpr = "fpr-sha256-128:" + sha256(b"atb-key-fingerprint-v1\n" + key).hexdigest()[:32]
 ```
 
 Domain-separated (never collides with or doubles as a content digest) and
-truncated to 128 bits. It exists so wrong material is a **named startup
+truncated to 128 bits. It is deliberately **purpose-independent**: purpose
+binding belongs to the per-construction domain labels, and folding it in here
+would make the same bytes fingerprint differently under each purpose — which
+would hide exactly the misconfiguration the guard exists to catch (the same key
+installed as both the identity and the seal key). Comparison is therefore
+across **all** epochs of **both** purposes: a repeat fingerprint is refused as
+key reuse. It exists so wrong material is a **named startup
 refusal** ("material for `idsign-000002` does not match the chained
 commitment") instead of undiagnosable mass denial, and so an auditor in 2036
 can prove they hold the right key before concluding "chain broken". Honest
@@ -208,6 +218,41 @@ revoked_by: ivan
 evidence_ref: ATB-DEC-004871   # optional chained pointer; never free text
 ```
 
+### Epoch state across a chain rotation
+
+**The registry is checkpoint-carried state, not archive history.** ATB-05's
+runtime reads only the active segment — archives are stat-only and may be
+legitimately detached — so a chained epoch record becomes invisible to the
+running broker the moment the chain rotates past it. Left unaddressed, one
+routine `atb rotate --execute` would silently un-enforce a chained
+`key_epoch_revoked`: the registry would replay empty, empty means *legacy
+single-key mode* (K17), and the broker would go back to accepting the very
+material the operator revoked. This is the identical failure ATB-05 fixed for
+detach authorizations, and it gets the identical treatment.
+
+The `chain_checkpoint` therefore carries a `key_epochs` list — one entry per
+epoch ever chained, for **both** purposes — seeded from the predecessor
+checkpoint's list plus every `key_epoch_adopted` / `key_epoch_activated` /
+`key_epoch_revoked` appended since:
+
+```yaml
+key_epochs:
+  - {purpose: identity_sign, kid: idsign-000001, epoch: 1, alg: hmac-sha256,
+     profile: atb-identity-token-v2, key_fpr: "fpr-sha256-128:…", kidless: false,
+     state: revoked, supersedes: idsign-000000,
+     activated_ref: ATB-DEC-004120, activated_seq: 4120,   # position bounds
+     superseded_ref: ATB-DEC-004890, revoked_ref: ATB-DEC-004901,
+     reason_code: key_compromise}
+```
+
+Entries are **state, not events**: they are never dropped (a `chain_seal` epoch
+must stay verifiable forever, and a revocation must stay in force forever), and
+positions are carried because containment is bound by chain position. Deep
+verification re-derives the list from the predecessor archive and byte-compares
+it, exactly as it already does for `pending` / `approvals` / `detached` — so a
+checkpoint that quietly drops a revocation fails verification. The record
+*count* for a rotation is unchanged at two; the checkpoint *payload* grows.
+
 Describing the legacy key is **not** retro-editing: the legacy tokens and
 records are untouched. The single-`kidless`-epoch rule is load-bearing — a
 second would force trial verification of kid-less tokens against multiple keys,
@@ -231,6 +276,31 @@ and substituting a different `auth_kid` invalidates it. A seal with no
 > **Rejected:** a `mac:<alg>:<kid>:<hex>` v2 seal format under a new domain
 > prefix. It would break every seal Milestone 5 has already written, for a
 > property the sibling field delivers at zero cost.
+
+**The authenticated-record set grows.** ATB-05 ships
+`LIFECYCLE_TYPES = {chain_rotated, chain_checkpoint, segment_detached}`, and
+both the tag check and the keyed-chain downgrade guard key off that set — so
+ATB-06's own records would be *unauthenticated by default*, and a chain-writer
+could forge a `key_epoch_revoked` or a `key_epoch_activated` naming their own
+material. ATB-06 therefore extends it to
+`AUTHENTICATED_TYPES = LIFECYCLE_TYPES | {key_epoch_adopted,
+key_epoch_activated, key_epoch_revoked, family_reanchored}`. Every record of
+those types **must** carry `auth_kid` + `auth` on a keyed chain, and
+verification **must** FAIL (exit 4) on any such record whose tag is absent or
+invalid under material present here. "Ordinary records" in the model above
+means only *one ATB-DEC id, an `at`, and no special handling in the queue's
+replay* — never "outside the tag demand".
+
+**Verification must reach the active segment.** ATB-05's keyed tag check runs
+inside the deep-verify archive loop only, so records in the *active* segment —
+where every freshly appended key record lives until the next rotation — are
+never tag-checked, and `--active-only` performs no tag verification at all
+while printing "PROVEN: no record in the active segment has been added,
+edited, removed, or reordered". ATB-06 lifts the check into a helper applied to
+**every** segment including the active one, and applies the unkeyed-downgrade
+guard there too, so an unkeyed run over a keyed chain cannot pass silently when
+the only keyed records are the recent ones. `--active-only`'s PROVEN sentence
+is amended to name what its tag check did and did not cover.
 
 ---
 
@@ -282,10 +352,23 @@ stopped, §5.1-gated:
 3. **Report** the new kid, its fingerprint, and — for `identity_sign` — the
    instant the overlap lapses.
 
-For `chain_seal`, activation is **dual-sealed**: `auth` under the new epoch and
-`auth_prev` under the outgoing one, with both keys required loadable at that
-moment. A verifier holding either key can therefore validate the handover
-itself, and neither key alone can forge a lineage change.
+For `chain_seal`, activation is **dual-sealed**, specified exactly:
+
+1. Build the activation payload with `auth_kid` set to the **outgoing** kid and
+   compute `auth_prev = seal_tag(payload_without_auth_and_auth_prev, old_key)`.
+2. Insert `auth_prev`, set `auth_kid` to the **new** kid, and compute
+   `auth = seal_tag(payload_without_auth, new_key)` — so the outer tag covers
+   `auth_prev` (it is an ordinary sibling field, exactly like `auth_kid`),
+   while the inner tag does not cover the outer one. Order matters and is
+   normative: computing them the other way makes neither tag cover the other.
+3. Both keys must be loadable at that moment, or the rotation refuses.
+
+A verifier holding **either** key can validate its half: the new key checks
+`auth`, the old key re-derives `auth_prev` over the payload minus both fields.
+Neither key alone can forge a lineage change, because a forger holding only the
+old key cannot produce `auth`, and one holding only the new key cannot produce
+`auth_prev`. Verification of `auth_prev` is a distinct code path from
+`verify_seal_tag` (which reads only `auth`) and is part of Milestone 6.
 
 **Emergency revocation** — `atb key revoke <kid> --reason-code …`:
 
@@ -361,10 +444,18 @@ that catalog pattern and deriver in the same governed change.
   see where material was *said* to live — including the literal ATB-01
   `kms://` URI, validated as a URI with no userinfo, query, or fragment — and
   it is **never resolved by the broker**.
-- **Startup consistency guard.** For every chained epoch that is active or
-  non-expired `verify_only`, material must resolve and its fingerprint must
-  equal the chained commitment, or the broker refuses to start. Missing
-  material for an *expired* epoch is normal — that is how old keys get deleted.
+- **Startup consistency guard**, scoped to material the broker must actually
+  *use*. For the **active** epoch of each purpose, and for every non-expired
+  `verify_only` **`identity_sign`** epoch, material must resolve and its
+  fingerprint must equal the chained commitment, or the broker refuses to
+  start. Superseded **`chain_seal`** epochs are checked *opportunistically*:
+  present material must match its fingerprint (a mismatch is the named refusal
+  of K2), but absent material is **not** a startup condition — it is an
+  `UNVERIFIED` tag at verify time (exit 3, INCOMPLETE). Demanding otherwise
+  would make a broker unstartable years later merely because an old seal key
+  was retired to cold storage, which is the normal end state, not a fault.
+  Missing material for an *expired* identity epoch is likewise normal — that is
+  how old keys get deleted.
 
 ---
 
@@ -470,10 +561,13 @@ as the epoch-0 material source, so an existing deployment needs no change.
 | # | Property | Test asserts |
 |---|---|---|
 | K1 | Epoch identity | `kid` is monotonic per purpose, never reused; a second `kidless` epoch is refused |
-| K2 | Fingerprint binds material | Wrong material for a chained epoch is a **named** startup refusal, not mass denial |
+| K2 | Fingerprint binds material | Wrong material for a chained epoch is a **named** startup refusal, not mass denial; the **same** bytes installed under both purposes is refused as key reuse |
 | K3 | Rotation is one atomic record | `key rotate --execute` appends exactly one `key_epoch_activated`; the predecessor is `verify_only` by derivation; no state has two active epochs |
 | K4 | Overlap is bounded | A token minted under the previous identity epoch verifies until `verify_until` and is refused after; a stepped-back clock does not widen the window |
 | K5 | Seals verify forever | A segment sealed under a superseded seal epoch still verifies after any number of rotations |
+| K5b | Epoch state survives rotation | After N rotations following a `key_epoch_revoked`, the revocation is still in force (its material is refused) and the registry is unchanged; a checkpoint that drops an epoch fails deep verification |
+| K5c | Key records are authenticated | On a keyed chain every `key_epoch_*` / `family_reanchored` record carries a valid tag; a forged or untagged one FAILS (exit 4), in the **active** segment as well as archives — including under `--active-only` |
+| K5d | Dual-sealed handover | A seal-epoch activation validates under either key; stripping or altering `auth_prev` invalidates `auth`; rotation refuses when either key is unloadable |
 | K6 | Kid is MAC-covered | Substituting `auth_kid` invalidates the tag; a seal written before ATB-06 (no `auth_kid`) still verifies |
 | K7 | No downgrade | A token/seal declaring an algorithm other than its epoch's is refused; an unimplemented algorithm is refused |
 | K8 | No secret leaks | No key byte appears in any `repr`, log line, error message, chained payload, or exported artifact (pinned for both key types) |
@@ -498,6 +592,10 @@ A conformance run that skips any row is a failed run.
       record vocabulary defined; legacy adoption bounded to one kidless epoch.
 - [x] `auth_kid` sibling-field migration verified against the shipped
       `seal_tag`; no seal-format break.
+- [x] Authenticated-record set extended to ATB-06's own record types; tag
+      verification extended to the active segment and to `--active-only`.
+- [x] Key-epoch registry carried across rotation so a chained revocation cannot
+      be un-enforced by a routine rotation.
 - [x] Token profiles v1 (frozen) and v2 (full coverage, canonical JSON,
       kid-in-MAC, no caller-supplied algorithm) specified.
 - [x] Rotation is one atomic append; revocation refuses on an active epoch;
@@ -515,7 +613,7 @@ A conformance run that skips any row is a failed run.
 - [x] CLI and configuration documented; nothing automatic.
 - [x] Residuals stated, including the symmetric-crypto limit and the unchained
       identity revocation gap.
-- [x] Conformance matrix (K1–K17) defined.
+- [x] Conformance matrix (K1–K17, plus K5b–K5d) defined.
 - [ ] Human review gate completed.
 
 ---
@@ -542,10 +640,12 @@ unchained identity revocation — are accepted as documented.
 ## Recommended Next Logical Deliverable
 
 **IANUA-ATB v0.1 — Reference Implementation, Milestone 6:** a stdlib-only
-`atb/keys.py` (epoch registry replayed from the chain, fingerprints, resolver
-with the startup consistency guard, closed algorithm registry), the v2 token
-profile alongside the frozen v1 path, `auth_kid` on lifecycle records,
+`atb/keys.py` (epoch registry replayed from the chain **and carried in the
+ATB-05 checkpoint**, fingerprints, resolver with the scoped startup consistency
+guard, closed algorithm registry), the v2 token profile alongside the frozen v1
+path, `auth_kid` + `auth_prev` on lifecycle records, the extended
+`AUTHENTICATED_TYPES` set with tag verification reaching the active segment,
 position-containment and three-valued outcomes in ATB-05 verification, the
 `atb key` verb group and `atb anchor`, per-record epoch attribution, and
-`.env.example` / `infra/README.md` updates — shipping the K1–K17 suite under
+`.env.example` / `infra/README.md` updates — shipping the K1–K17 (plus K5b–K5d) suite under
 `tests/security` and passing the full IANUA gate set from the first commit.
