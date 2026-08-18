@@ -22,6 +22,7 @@ from typing import Any
 from atb.audit import AuditRecord, AuditSink
 from atb.policy import Decision, Effect
 
+CHECKPOINT = "chain_checkpoint"  # ATB-05 carried-state seed
 SUBMITTED = "escalation_submitted"
 RESOLVED = "escalation_resolved"
 CONSUMED = "approval_consumed"
@@ -57,7 +58,28 @@ class EscalationQueue:
             payload = record.payload
             kind = payload.get("type")
             ref = str(payload.get("ref", ""))
-            if kind == SUBMITTED:
+            if kind == CHECKPOINT:
+                # ATB-05: a rotation's checkpoint SEEDS the open state it
+                # carried forward, before later records overlay it. Carried
+                # entries are indistinguishable from segment-local ones to
+                # every operation below — that is what makes post-rotation
+                # behavior identical by construction.
+                for entry in payload.get("pending", []):
+                    submitted[str(entry["ref"])] = dict(entry)
+                for entry in payload.get("approvals", []):
+                    key = str(entry["ref"])
+                    submitted[key] = {
+                        "ref": key,
+                        "subject": entry.get("subject", ""),
+                        "action": entry.get("action", ""),
+                        "resource": entry.get("resource", ""),
+                        "reason": entry.get("reason", ""),
+                    }
+                    resolved[key] = {
+                        "approved": True,
+                        "approver": entry.get("approver", ""),
+                    }
+            elif kind == SUBMITTED:
                 submitted[ref] = payload
             elif kind == RESOLVED:
                 resolved[ref] = payload

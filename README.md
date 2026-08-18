@@ -17,6 +17,7 @@ EAODS reference implementation of **PAT-0001 (Zero Trust Service Identity)** and
 | [ATB-02](docs/IANUA-ATB-v0.1-Scope-Catalog-and-Delegation-Model.md) | Scope catalog, role bindings, delegation, conformance matrix |
 | [ATB-03](docs/IANUA-ATB-v0.1-Runtime-Enforcement-Point.md) | Runtime enforcement point (PEP), tool-call mediation, closed-world tool map |
 | [ATB-04](docs/IANUA-ATB-v0.1-Response-Screening-and-Quarantine.md) | Tool-response screening, quarantine, human release loop (screening as input, never authority) |
+| [ATB-05](docs/IANUA-ATB-v0.1-Audit-Chain-Lifecycle.md) | Audit-chain lifecycle: segment rotation, checkpointing, chained time, deep verification |
 
 ## Package
 
@@ -31,7 +32,8 @@ EAODS reference implementation of **PAT-0001 (Zero Trust Service Identity)** and
 | `atb.escalation` | Persistent escalation queue; human approve/deny recorded in the chain |
 | `atb.enforcement` | ATB-03 PEP: closed-world tool map; forward / screen / refuse / escalate mediation |
 | `atb.screening` | ATB-04 response screener: versioned closed-world ruleset; content-addressed quarantine stores |
-| `atb.cli` | Operator CLI (`atb pending / show / approve / deny / verify / screen-stats / quarantine`) |
+| `atb.lifecycle` | ATB-05 chain lifecycle: segments, seals/checkpoints, crash-safe rotation, deep verification |
+| `atb.cli` | Operator CLI (`atb pending / show / approve / deny / verify / rotate / detach / repair / screen-stats / quarantine`) |
 
 Stdlib only. Signing keys are supplied at construction — never hard-coded, never logged.
 
@@ -44,6 +46,9 @@ enforcement matrix** — each row asserting a forward-vs-refuse outcome, not
 merely a decision. `tests/security/test_screening.py` adds the ATB-04
 **S1–S19 screening matrix** — each row asserting a withhold, a release-loop
 property, or an exact record count, never merely a verdict.
+`tests/security/test_lifecycle.py` adds the ATB-05 **L1–L25 lifecycle matrix** —
+each row asserting fail-closed detection, cryptographic continuity across a
+rotation, or carried-state equivalence against an unrotated control.
 
 ```bash
 python -m venv .venv && .venv/bin/pip install pytest
@@ -70,6 +75,16 @@ atb deny ATB-DEC-000123 --reason "unknown destination"
 
 ```bash
 atb verify
+```
+
+Rotate the chain when it grows (gateway stopped; dry run first, nothing deleted):
+
+```bash
+atb rotate
+```
+
+```bash
+atb rotate --execute
 ```
 
 Approvals are recorded in the hash chain, attributed to `--approver` (default:
@@ -112,3 +127,9 @@ lives in [`infra/`](infra/README.md).
   a named human approval digest-bound to the exact reviewed bytes. Screening is
   an input to a policy decision, never authority — verdicts only tighten, a
   clean verdict proves nothing, and there is **no screening off-switch**.
+- The chain has a lifecycle (ATB-05): rotation seals the active segment into a
+  read-only, digest-committed archive and opens a successor whose first record
+  chains to the sealed tip — so segments cannot be dropped, swapped, or forged
+  undetected. Deep, full-history verification is the **default**; every weaker
+  mode is an explicit flag that prints what it does not prove. Rotation is
+  human-run, crash-safe, and **deletes nothing**.
