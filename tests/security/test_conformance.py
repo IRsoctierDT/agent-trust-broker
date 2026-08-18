@@ -192,3 +192,22 @@ def test_t12_every_decision_path_appends_one_chained_record(
     hashes = [record.record_hash for record in engine.log.records]
     prevs = [record.prev_hash for record in engine.log.records]
     assert prevs[1:] == hashes[:-1]
+
+
+# ------------------------------------------------ key-hygiene regressions
+def test_signing_key_never_renders_in_repr() -> None:
+    """The HMAC key must not appear in repr/tracebacks (charter §5)."""
+    authority = IdentityAuthority(signing_key=b"SUPER-SECRET-KEY-MATERIAL")
+    rendered = repr(authority)
+    assert "SUPER-SECRET" not in rendered
+    assert "signing_key" not in rendered
+
+
+def test_identity_failure_reasons_are_closed_vocabulary() -> None:
+    """Exception text is never interpolated into an immutable chained record."""
+    log = AuditLog()
+    authority = IdentityAuthority(signing_key=b"test-only-key")
+    engine = PolicyEngine(authority=authority, log=log)
+    decision = engine.authorize("ATB-ID-999999.forged", "tool:log.read", "logs/lab/a.jsonl")
+    assert decision.reason == "identity_invalid:unknown"
+    assert decision.audit.payload["reason"] == "identity_invalid:unknown"
