@@ -102,13 +102,15 @@ def test_downstream_failure_reported_in_band(gateway: Gateway) -> None:
     assert gateway.pep.engine.log.records[-1].payload["effect"] == "allow"
 
 
-def test_unserializable_downstream_result_degrades(gateway: Gateway) -> None:
-    """A non-JSON downstream result degrades the text, not the session."""
+def test_unserializable_downstream_result_withheld(gateway: Gateway) -> None:
+    """ATB-04: a non-JSON downstream result is withheld fail-closed, not relayed."""
     gateway.pep.downstream = lambda tool, arguments: object()
     token = _mint(gateway)
     result = _call(gateway, "log_read", {"name": "auth.jsonl"}, token)
-    assert result["isError"] is False  # the call did execute
-    assert "not JSON-serializable" in result["content"][0]["text"]
+    assert result["isError"] is True
+    assert result["_meta"]["atb"]["effect"] == "deny"
+    assert result["_meta"]["atb"]["reason"] == "textualization_failed"
+    assert "refused: textualization_failed" in result["content"][0]["text"]
 
 
 def test_unknown_method_and_internal_error_codes(gateway: Gateway) -> None:

@@ -2,7 +2,7 @@
 title: "IANUA-ATB v0.1 — Volume ATB-04: Tool-Response Screening & Quarantine"
 series: "IANUA Engineering Reference"
 volume: "ATB-04"
-status: "Draft — pending human review gate"
+status: "Authoritative — maintainer review gate passed 2026-08-15"
 supersedes: "None (extends ATB-01, ATB-02, ATB-03)"
 companion_docs:
   - "IANUA-ATB v0.1 — Volume ATB-01: Identity Issuance & Zero-Trust Policy Enforcement"
@@ -209,9 +209,12 @@ decision is provable offline.
 | ATB-R008 | `approval_steering` | NORM | conjunctive: `(use\|pass\|set\|include\|supply) …{0,30} approval_ref` or `ATB-DEC-\d{6} …{0,40} \bapprove\b` (standalone token — the JSON-key forms `"approved"`/`"approver"` in serialized resolution records do not match) — content coaching the agent to spend or solicit approvals | Low by construction: a bare `ATB-DEC-` id never flags; the known boundary case — `audit_read` returning a serialized `escalation_resolved` record — screens clean because `approved`/`approver` are not the standalone token (S12 golden vector) |
 | ATB-R009 | `secret_material` | RAW | credential shapes: `AKIA[0-9A-Z]{16}`, `-----BEGIN … PRIVATE KEY-----`, `xox[baprs]-…`, JWT `eyJ….eyJ…` — leaked credentials must not transit into a model context | Near-zero (anchored high-entropy shapes); residual FPs are documentation example keys. Turns the screen into leak containment, not just injection defense |
 
-All patterns use bounded quantifiers and no nested unbounded repetition (no
-catastrophic backtracking); the scan cap bounds input size. New rules must pass the
-same review. **Known-ruleset evasion posture:** an attacker who reads this table can
+All repetition is bounded, and any alternative whose runs straddle a mandatory
+literal (the JWT shape in ATB-R009) carries a run-start negative lookbehind so its
+worst case stays linear in the scan cap rather than quadratic — bounds alone do not
+suffice there. The screening suite includes a ReDoS regression vector (a scan-cap-
+sized adversarial input) asserting completion under a small wall-clock budget. New
+rules must pass the same review. **Known-ruleset evasion posture:** an attacker who reads this table can
 craft a payload that passes (homoglyphs across scripts, novel phrasing, short
 encodings, cross-call chunking) — accepted and documented, because a silent pass
 confers zero authority; the steered action still faces the deterministic scope model.
@@ -473,7 +476,7 @@ security envelope.
 |---|---|---|
 | `atb show <ref>` | read-only | Metadata-first triage: evidence labels, rule descriptions, prior-adjudication hint for the digest |
 | `atb quarantine show <ref>` | read-only | Escaped, integrity-verified payload view with invisible-character census and ruleset-skew warning |
-| `atb screen-stats` | read-only | Chain-derived per-rule telemetry: hits, releases, denies, unresolved, release-rate — a rule near 100 % release is a retirement candidate; rising release latency is measurable rubber-stamping decay |
+| `atb screen-stats` | read-only | Chain-derived per-rule telemetry: hits, releases, denies, unresolved, release-rate — a rule near 100 % release is a retirement candidate; a climbing release-rate is measurable rubber-stamping decay (per-decision latency needs a chained timestamp — an ATB-01 audit-schema change deferred to ATB-05) |
 | `atb quarantine purge` | destructive, prompted | Deletes only purge-eligible blobs — no escalation referencing the digest, across all subjects, pending or approved-but-unconsumed (AGENTS.md §5.1: the human runs it deliberately) |
 
 All verbs obey the single-writer discipline; the read-only verbs append nothing.
@@ -519,8 +522,9 @@ ATB-04 guards the one crossing the series had not yet instrumented, and touches 
   coalescing dedupes queue rows; prior-adjudication hints surface "seen before,
   released before" at triage time.
 - **Fatigue is measurable, not hoped away** — `atb screen-stats` computes per-rule
-  release rates and latencies offline from the chain alone (PAT-0003: evidence is a
-  by-product of running). ATB-R004 and ATB-R007 are pre-nominated tuning candidates.
+  release rates offline from the chain alone (PAT-0003: evidence is a by-product of
+  running); per-decision latency awaits a chained timestamp (ATB-05). ATB-R004 and
+  ATB-R007 are pre-nominated tuning candidates.
 - **Chain growth** — flagged calls append +2 over baseline (+1 coalesced); clean calls
   zero. Queue replay is O(n); a flag storm inflates n permanently. Chain rotation /
   checkpointing is out of scope — the standing ATB-05 candidate.
@@ -640,7 +644,7 @@ A conformance run that skips any row is a failed run.
 - [x] Fail-closed default verified in every decision path; no kill-switch exists.
 - [x] Operator economics and PAT-0003 evidence story documented; residuals listed.
 - [x] Conformance matrix (S1–S19) defined.
-- [ ] Human review gate completed.
+- [x] Human review gate completed.
 
 ---
 
@@ -658,7 +662,11 @@ bounded, placement-checked, write-once, and read-verified; screening has no
 kill-switch and its default is on; and the volume's residual risks are accepted as
 documented.
 
-**Reviewer:** ____________________   **Date:** __________   **Decision:** approve / revise
+**Reviewer:** Ivan Rozenblad (repository maintainer)   **Date:** 2026-08-15   **Decision:** **approve**
+
+> Approval recorded per maintainer directive in the working session of 2026-08-15
+> ("proceed", in response to the presented ATB-04 review-gate summary and blast-radius
+> note). Implementation of Milestone 4 is authorized against this volume as specified.
 
 ---
 

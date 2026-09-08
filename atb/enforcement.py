@@ -27,6 +27,13 @@ Security considerations (fail-closed by construction):
 - **No decision reuse (no TOCTOU gap).** The forward happens in the same
   call frame as the decision; nothing is cached across invocations.
 - **Tokens and raw tool arguments are never written to the audit chain.**
+- **Responses are screened before relay (ATB-04).** On the ALLOW branch the
+  downstream result passes a deterministic screener; a flagged response is
+  withheld, quarantined content-addressed, and converted into a human gate
+  by a second engine decision on the always-escalating, role-unbound
+  ``atb:response.release`` scope. Verdicts only tighten; a clean verdict
+  changes nothing; every screening failure withholds. The chain carries
+  evidence labels (rule ids, ruleset version, digest, sizes) — never text.
 """
 
 from __future__ import annotations
@@ -39,9 +46,21 @@ from urllib.parse import urlsplit
 
 from atb.catalog import CATALOG
 from atb.escalation import EscalationQueue
-from atb.policy import Effect, PolicyEngine
+from atb.policy import Decision, Effect, PolicyEngine
+from atb.screening import (
+    RELEASE_ACTION,
+    SCREENING_REFUSAL,
+    MemoryQuarantineStore,
+    QuarantineError,
+    QuarantineStore,
+    ResponseScreener,
+    ScreenVerdict,
+)
 
 REFUSAL = "enforcement_refusal"
+
+# The exact resource shape a release approval is triple-bound to.
+_QUARANTINE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 # A single path-safe name component: no separators, no leading dot, and the
 # explicit ".." reject below keeps even in-charset dotted runs conservative.
@@ -84,6 +103,7 @@ class MediationResult:
     security_event: bool
     pending_ref: str = ""
     result: object | None = None
+    quarantine_digest: str = ""
 
 
 def _require_str(arguments: Mapping[str, Any], key: str) -> str:
@@ -125,6 +145,22 @@ def _workspace_path(key: str) -> Deriver:
 
     def derive(arguments: Mapping[str, Any]) -> str:
         return _require_str(arguments, key)
+
+    return derive
+
+
+def _quarantine_ref(key: str) -> Deriver:
+    """Derive a quarantine resource from an exact ``sha256:<hex>`` digest.
+
+    Anything but the full-match digest shape fails closed as a derivation
+    error — the release approval must be triple-bound to exact bytes.
+    """
+
+    def derive(arguments: Mapping[str, Any]) -> str:
+        value = _require_str(arguments, key)
+        if not _QUARANTINE_DIGEST.fullmatch(value):
+            raise DerivationError(f"argument {key!r} is not a sha256 content digest")
+        return f"quarantine:{value}"
 
     return derive
 
@@ -176,6 +212,7 @@ TOOL_MAP: dict[str, ToolRule] = {
     "policy_read": ToolRule("atb:policy.read", _fixed("atb:policy")),
     "audit_read": ToolRule("atb:audit.read", _fixed("atb:audit")),
     "mint_sub_identity": ToolRule("atb:identity.mint", _fixed("atb:identity")),
+    "response_release": ToolRule(RELEASE_ACTION, _quarantine_ref("digest")),
 }
 
 
@@ -194,24 +231,33 @@ def _validated_context(context: Mapping[str, str]) -> dict[str, str]:
     """Copy the caller's context; fail closed on non-string keys or values.
 
     The static type says ``str -> str``, but the boundary input is untrusted
-    wire data — the runtime check is the control, not the annotation.
+    wire data — the runtime check is the control, not the annotation. The
+    screening-evidence namespace (``origin_ref`` and any ``screen_*`` key) is
+    reserved for PEP-built flag evidence: a caller may not supply it, so a
+    chained release decision's ``screen_*`` labels can only come from the PEP.
     """
     validated: dict[str, str] = {}
     for key, value in context.items():
         if not isinstance(key, str) or not isinstance(value, str):
             raise DerivationError("context keys and values must be strings")
+        if key == "origin_ref" or key.startswith("screen_"):
+            raise DerivationError(f"context key {key!r} is reserved for screening evidence")
         validated[key] = value
     return validated
 
 
 @dataclass
 class PolicyEnforcementPoint:
-    """Inline reference monitor: derive -> decide -> forward/refuse/escalate."""
+    """Inline reference monitor: derive -> decide -> forward/screen/refuse/escalate."""
 
     engine: PolicyEngine
     queue: EscalationQueue
     downstream: Downstream
     tool_map: Mapping[str, ToolRule] = field(default_factory=lambda: dict(TOOL_MAP))
+    # ATB-04 secure defaults: screening is ON in every construction and there
+    # is no disable flag — weakening it is a code change through review.
+    screener: ResponseScreener = field(default_factory=ResponseScreener)
+    quarantine: QuarantineStore = field(default_factory=MemoryQuarantineStore)
 
     def __post_init__(self) -> None:
         # A custom map is a governed change; it meets the same T11 bar.
@@ -228,19 +274,16 @@ class PolicyEnforcementPoint:
         except DerivationError as exc:
             return self._refuse(invocation.tool, f"derivation_failed: {exc}")
 
+        if rule.action == RELEASE_ACTION:
+            return self._mediate_release(invocation, resource, context)
+
         decision = self.engine.authorize(invocation.token, rule.action, resource, context)
         if decision.effect is Effect.ALLOW:
             # The authorization is already recorded; a downstream error is
-            # surfaced unchanged, never swallowed and never retried.
+            # surfaced unchanged, never swallowed and never retried. The
+            # returned value is screened before it may reach the agent.
             outcome = self.downstream(invocation.tool, dict(invocation.arguments))
-            return MediationResult(
-                forwarded=True,
-                effect=Effect.ALLOW,
-                reason=decision.reason,
-                audit_ref=decision.audit.decision_id,
-                security_event=decision.security_event,
-                result=outcome,
-            )
+            return self._screen_and_relay(invocation, decision, outcome)
         if decision.effect is Effect.ESCALATE:
             pending_ref = self.queue.submit(decision)
             return MediationResult(
@@ -257,6 +300,171 @@ class PolicyEnforcementPoint:
             reason=decision.reason,
             audit_ref=decision.audit.decision_id,
             security_event=decision.security_event,
+        )
+
+    # ------------------------------------------------------------ screening
+    def _screen_and_relay(
+        self, invocation: ToolInvocation, decision: Decision, outcome: object
+    ) -> MediationResult:
+        """Screen a forwarded result; relay only a clean verdict (ATB-04)."""
+        try:
+            verdict = self.screener.screen(outcome)
+        except Exception:  # noqa: BLE001 - any screener defect fails closed
+            # The pipeline itself is suspect: withhold, discard, fixed token
+            # (an exception class name is downstream-influencable text).
+            return self._screening_refusal(invocation.tool, "screener_error")
+        if verdict.cause == "clean":
+            return MediationResult(
+                forwarded=True,
+                effect=Effect.ALLOW,
+                reason=decision.reason,
+                audit_ref=decision.audit.decision_id,
+                security_event=decision.security_event,
+                result=outcome,
+            )
+        if verdict.releasable and verdict.payload is not None:
+            try:
+                digest = self.quarantine.put(verdict.payload)
+            except (QuarantineError, OSError):
+                # Any store fault — declared or a leaked OSError from a custom
+                # store — withholds fail-closed, never a transport failure.
+                return self._screening_refusal(invocation.tool, "quarantine_unavailable", verdict)
+            # The flag becomes a second authority question, answered by the
+            # engine on the always-escalating, role-unbound release scope.
+            # Evidence context is PEP-built from the verdict only — the
+            # caller's context (and any injected approval_ref) is never
+            # merged here, so a flag can never auto-release.
+            release = self.engine.authorize(
+                invocation.token,
+                RELEASE_ACTION,
+                f"quarantine:{digest}",
+                {
+                    "screen_ruleset": verdict.ruleset_version,
+                    "screen_rules_digest": verdict.rules_digest,
+                    "screen_rules": ",".join(verdict.rule_ids),
+                    "screen_cause": verdict.cause,
+                    "screen_digest": digest,
+                    "screen_bytes": str(verdict.size_bytes),
+                    "screen_invisibles": str(verdict.invisible_count),
+                    "origin_ref": decision.audit.decision_id,
+                },
+            )
+            if release.effect is Effect.ESCALATE:
+                return MediationResult(
+                    forwarded=True,
+                    effect=Effect.ESCALATE,
+                    reason=release.reason,
+                    audit_ref=release.audit.decision_id,
+                    security_event=release.security_event,
+                    pending_ref=self._submit_release(release),
+                    quarantine_digest=digest,
+                )
+            if release.effect is Effect.DENY:
+                return MediationResult(
+                    forwarded=True,
+                    effect=Effect.DENY,
+                    reason=release.reason,
+                    audit_ref=release.audit.decision_id,
+                    security_event=release.security_event,
+                )
+            # Impossible today (the PEP passes no approval_ref and the scope
+            # always escalates); withhold anyway and evidence the anomaly.
+            return self._screening_refusal(invocation.tool, "release_invariant_violation", verdict)
+        return self._screening_refusal(invocation.tool, verdict.cause, verdict)
+
+    def _mediate_release(
+        self, invocation: ToolInvocation, resource: str, context: dict[str, str]
+    ) -> MediationResult:
+        """Serve quarantined content on a consumed human approval (ATB-04).
+
+        The blob is read and verified *before* the decision, so a storage
+        fault refuses pre-decision and never spends the one-shot approval;
+        an ALLOW serves the in-frame bytes — no downstream call, no
+        side-effect replay, no TOCTOU.
+        """
+        digest = resource.removeprefix("quarantine:")
+        blob = self.quarantine.get(digest)
+        if blob is None:
+            return self._refuse(invocation.tool, "quarantine_missing")
+        decision = self.engine.authorize(invocation.token, RELEASE_ACTION, resource, context)
+        if decision.effect is Effect.ALLOW:
+            try:
+                result: object = blob.decode("utf-8")
+            except UnicodeDecodeError:
+                result = blob
+            return MediationResult(
+                forwarded=False,
+                effect=Effect.ALLOW,
+                reason=decision.reason,
+                audit_ref=decision.audit.decision_id,
+                security_event=decision.security_event,
+                result=result,
+            )
+        if decision.effect is Effect.ESCALATE:
+            return MediationResult(
+                forwarded=False,
+                effect=Effect.ESCALATE,
+                reason=decision.reason,
+                audit_ref=decision.audit.decision_id,
+                security_event=decision.security_event,
+                pending_ref=self._submit_release(decision),
+                quarantine_digest=digest,
+            )
+        return MediationResult(
+            forwarded=False,
+            effect=Effect.DENY,
+            reason=decision.reason,
+            audit_ref=decision.audit.decision_id,
+            security_event=decision.security_event,
+        )
+
+    def _submit_release(self, decision: Decision) -> str:
+        """Submit a release escalation, coalescing onto an open pending row.
+
+        One pending row per unresolved (subject, action, resource) triple:
+        every occurrence still chains its own escalate decision (evidence
+        preserved), but a repeated byte-identical payload cannot flood the
+        operator's queue. Applies to the release scope only — pre-forward
+        escalations keep the unchanged M2 behavior.
+        """
+        payload = decision.audit.payload
+        triple = (
+            str(payload.get("subject", "")),
+            str(payload.get("action", "")),
+            str(payload.get("resource", "")),
+        )
+        for row in self.queue.pending():
+            if (row.subject, row.action, row.resource) == triple:
+                return row.ref
+        return self.queue.submit(decision)
+
+    def _screening_refusal(
+        self, tool: str, reason: str, verdict: ScreenVerdict | None = None
+    ) -> MediationResult:
+        """Withhold a forwarded result on an unreleasable screening failure.
+
+        Chains the call's second record (``screening_refusal``) with
+        evidence labels only — ruleset version, rules digest, size where
+        known — never response text and never exception detail.
+        """
+        payload: dict[str, Any] = {
+            "type": SCREENING_REFUSAL,
+            "tool": tool,
+            "effect": Effect.DENY.value,
+            "reason": reason,
+            "ruleset_version": self.screener.version,
+            "rules_digest": self.screener.rules_digest,
+            "security_event": True,
+        }
+        if verdict is not None and verdict.size_bytes:
+            payload["size_bytes"] = verdict.size_bytes
+        record = self.engine.log.append(payload)
+        return MediationResult(
+            forwarded=True,
+            effect=Effect.DENY,
+            reason=reason,
+            audit_ref=record.decision_id,
+            security_event=True,
         )
 
     def _refuse(self, tool: str, reason: str) -> MediationResult:
