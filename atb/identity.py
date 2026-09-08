@@ -45,7 +45,10 @@ class Identity:
 class IdentityAuthority:
     """Issues and verifies scoped, short-lived agent identities."""
 
-    signing_key: bytes
+    # repr=False so the HMAC key never renders in a traceback, a debug print,
+    # or a structured logger that reprs its arguments. "Never logged" has to be
+    # structural: the charter's invariant cannot depend on every caller's care.
+    signing_key: bytes = field(repr=False)
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
     _store: dict[str, Identity] = field(default_factory=dict)
     _revoked: set[str] = field(default_factory=set)

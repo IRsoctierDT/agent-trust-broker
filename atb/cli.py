@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import os
 import re
 import sys
@@ -39,9 +40,28 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from atb.audit import AuditRecord
-from atb.escalation import CONSUMED, RESOLVED, SUBMITTED, EscalationError, EscalationQueue
-from atb.persistence import AuditIntegrityError, JsonlAuditStore
+from atb.audit import AuditRecord, utc_now
+from atb.escalation import (
+    CHECKPOINT,
+    CONSUMED,
+    RESOLVED,
+    SUBMITTED,
+    EscalationError,
+    EscalationQueue,
+)
+from atb.lifecycle import (
+    DETACHED,
+    LifecycleError,
+    active_head,
+    check_anchor,
+    execute_rotation,
+    file_digest,
+    plan_rotation,
+    seal_tag,
+    segment_path,
+    verify_family,
+)
+from atb.persistence import AuditIntegrityError, JsonlAuditStore, trim_torn_tail
 from atb.screening import RELEASE_ACTION, FileQuarantineStore, ResponseScreener
 
 
@@ -129,7 +149,21 @@ def _release_lifecycle(
         payload = record.payload
         kind = payload.get("type")
         ref = str(payload.get("ref", ""))
-        if kind == SUBMITTED and str(payload.get("action", "")) == RELEASE_ACTION:
+        if kind == CHECKPOINT:
+            # ATB-05: honor carried state here too. Purge eligibility, show's
+            # prior-adjudication summary, and screen-stats all read this
+            # replay — a carried, still-open release escalation must stay
+            # visible, or purge would delete evidence under an open gate.
+            for entry in payload.get("pending", []):
+                if str(entry.get("action", "")) == RELEASE_ACTION:
+                    submitted[str(entry["ref"])] = dict(entry)
+            for entry in payload.get("approvals", []):
+                key = str(entry["ref"])
+                if str(entry.get("action", "")) != RELEASE_ACTION:
+                    continue
+                submitted[key] = dict(entry)
+                resolved[key] = {"approved": True, "approver": entry.get("approver", "")}
+        elif kind == SUBMITTED and str(payload.get("action", "")) == RELEASE_ACTION:
             submitted[ref] = payload
         elif kind == RESOLVED:
             resolved[ref] = payload
@@ -339,9 +373,50 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--approver", help="who (default: current OS user)")
         cmd.set_defaults(func=lambda a, _approved=approved: _resolve(a, approved=_approved))
 
-    sub.add_parser("verify", help="verify the audit chain end to end").set_defaults(
-        func=_cmd_verify
+    verify = sub.add_parser("verify", help="verify the whole segment family (deep by default)")
+    verify.add_argument(
+        "--active-only",
+        action="store_true",
+        help="verify only the active segment (prints what it does NOT prove)",
     )
+    verify.add_argument("--expect-tip", help="off-box anchor: this hash must be in the lineage")
+    verify.add_argument("--expect-seq", type=int, help="sequence recorded with the anchor")
+    verify.add_argument(
+        "--with-segment",
+        action="append",
+        metavar="PATH",
+        help="re-present a detached archive from cold storage",
+    )
+    verify.add_argument(
+        "--allow-unkeyed",
+        action="store_true",
+        help="accept a keyed chain without its seal key (explicit downgrade)",
+    )
+    verify.set_defaults(func=_cmd_verify_family)
+
+    rotate = sub.add_parser("rotate", help="seal the active segment and open its successor")
+    rotate.add_argument("--execute", action="store_true", help="act (default is a dry run)")
+    rotate.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    rotate.add_argument(
+        "--force-carry",
+        action="store_true",
+        help="rotate despite a large carried open-state backlog",
+    )
+    rotate.set_defaults(func=_cmd_rotate)
+
+    detach = sub.add_parser("detach", help="authorize an archived segment to leave the volume")
+    detach.add_argument("segment", type=int, help="segment index (e.g. 1)")
+    detach.add_argument("--reason", required=True, help="why (recorded in the chain)")
+    detach.add_argument("--approver", help="who (default: current OS user)")
+    detach.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    detach.add_argument("--allow-unkeyed", action="store_true")
+    detach.set_defaults(func=_cmd_detach)
+
+    repair = sub.add_parser("repair", help="gated recovery for a torn, unacknowledged tail")
+    repair.add_argument("--trim-torn-tail", action="store_true", help="name the repair")
+    repair.add_argument("--execute", action="store_true", help="act (default is a dry run)")
+    repair.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    repair.set_defaults(func=_cmd_repair)
 
     show = sub.add_parser("show", help="metadata-first triage of one chained record")
     show.add_argument("ref", help="decision id (e.g. ATB-DEC-000123)")
@@ -374,3 +449,182 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# --------------------------------------------------------- ATB-05 lifecycle
+def _seal_key() -> bytes | None:
+    """Optional HMAC seal key from the environment; fail closed on garbage."""
+    raw = os.environ.get("ATB_CHAIN_SEAL_KEY", "").strip()
+    if not raw:
+        return None
+    try:
+        key = bytes.fromhex(raw)
+    except ValueError as exc:
+        raise SystemExit("error: ATB_CHAIN_SEAL_KEY must be hex-encoded") from exc
+    if len(key) < 32:
+        raise SystemExit("error: ATB_CHAIN_SEAL_KEY must be at least 32 bytes")
+    return key
+
+
+def _cmd_rotate(args: argparse.Namespace) -> int:
+    """Seal the active segment and open its successor (dry run by default)."""
+    path = _resolve_chain_path(args.chain)
+    try:
+        store = JsonlAuditStore.open(path, now=utc_now, for_append=False)
+        plan = plan_rotation(path, store.records, force_carry=args.force_carry)
+    except (AuditIntegrityError, LifecycleError) as exc:
+        raise SystemExit(f"error: {exc}") from exc
+    print(f"active segment : {path} (segment {plan.segment}, {plan.records} records)")
+    print(f"would archive  : {plan.archive.name}")
+    print(
+        f"carried state  : {len(plan.carried.pending)} pending, "
+        f"{len(plan.carried.approvals)} unconsumed approval(s), "
+        f"{len(plan.carried.detached)} detached segment(s)"
+    )
+    for entry in plan.carried.pending:
+        print(
+            f"  pending {entry['ref']} {entry.get('action', '')} {entry.get('resource', '')}"
+            f" (since {entry.get('at') or 'unknown'})"
+        )
+    if plan.resuming:
+        print("state          : ROTATION INCOMPLETE — this run resumes it")
+    if not args.execute:
+        print("\nnothing rotated — re-run with --execute (gateway must be stopped)")
+        return 0
+    if not args.yes:
+        if input("Seal this segment and open its successor? [y/N] ").strip().lower() != "y":
+            print("Aborted; nothing rotated.")
+            return 1
+    try:
+        store = JsonlAuditStore.open(path, now=utc_now, for_append=not plan.resuming)
+        result = execute_rotation(
+            store, seal_key=_seal_key(), force_carry=args.force_carry, now=utc_now
+        )
+    except (AuditIntegrityError, LifecycleError) as exc:
+        raise SystemExit(f"error: {exc}") from exc
+    print(f"\nsealed archive : {result.archive.name}")
+    print(f"  sha256       : {result.archive_digest}")
+    print(f"    verify off-box with: sha256sum {result.archive.name}")
+    print(f"new tip hash   : {result.tip_hash}")
+    print(f"new tip seq    : {result.tip_sequence}")
+    print("  RECORD THE TIP OFF-BOX — it is your external trust anchor")
+    print("  check it later with: atb verify --expect-tip <hash>")
+    print("restart the gateway when the archive copy is confirmed.")
+    return 0
+
+
+def _cmd_verify_family(args: argparse.Namespace) -> int:
+    """Verify the whole segment family (deep by default)."""
+    path = _resolve_chain_path(args.chain)
+    presented: dict[int, Path] = {}
+    for item in args.with_segment or []:
+        candidate = Path(item)
+        if not candidate.is_file():
+            raise SystemExit(f"error: no presented segment at {candidate}")
+        match = re.search(r"\.seg-(\d{6})", candidate.name)
+        if not match:
+            raise SystemExit(f"error: {candidate.name} is not a segment file name")
+        presented[int(match.group(1))] = candidate
+    try:
+        result = verify_family(
+            path,
+            deep=not args.active_only,
+            seal_key=_seal_key(),
+            allow_unkeyed=args.allow_unkeyed,
+            presented=presented,
+        )
+    except LifecycleError as exc:
+        raise SystemExit(f"error: {exc}") from exc
+    print(f"{'SEG':<5} {'FILE':<34} {'RECORDS':>7}  STATUS")
+    for row in result.segments:
+        print(
+            f"{row.index:<5} {row.file:<34} {row.records:>7}  {row.status.upper()}"
+            f"{'  ' + row.detail if row.detail else ''}"
+        )
+    print(f"tip: {result.tip_hash} (seq {result.tip_sequence})")
+    if args.active_only:
+        head = active_head(JsonlAuditStore.open(path, for_append=False).records)
+        since = head["prev_segment_last_decision"] if head else "genesis"
+        print(
+            f"PROVEN: no record in the active segment (since {since}) has been added, "
+            "edited, removed, or reordered."
+        )
+        print(
+            "NOT PROVEN: that archived segments match their committed digests — verify "
+            "them where they are stored (sha256sum), then run atb verify."
+        )
+    for failure in result.failures:
+        print(f"FAILED: {failure}")
+    if args.expect_tip:
+        records = JsonlAuditStore.open(path, for_append=False).records
+        if check_anchor(result, records, args.expect_tip, args.expect_seq):
+            print(f"anchor OK: {args.expect_tip} is in this lineage")
+        else:
+            print(f"FAILED: anchor {args.expect_tip} is NOT in this lineage (rollback?)")
+            return 1
+    return 0 if result.ok else 1
+
+
+def _cmd_detach(args: argparse.Namespace) -> int:
+    """Authorize an archived segment to leave the volume (chained, gated)."""
+    path = _resolve_chain_path(args.chain)
+    archive = segment_path(path, args.segment)
+    if not archive.is_file():
+        raise SystemExit(f"error: no archived segment {args.segment} at {archive}")
+    result = verify_family(path, seal_key=_seal_key(), allow_unkeyed=args.allow_unkeyed)
+    if not result.ok:
+        raise SystemExit("error: deep verify is not green — refusing to detach")
+    digest = file_digest(archive)
+    print(f"segment {args.segment}: {archive.name}")
+    print(f"  sha256: {digest}")
+    print("  confirm you hold an off-box copy verified against this digest.")
+    if not args.yes:
+        if input(f"Authorize detaching segment {args.segment}? [y/N] ").strip().lower() != "y":
+            print("Aborted; nothing detached.")
+            return 1
+    store = JsonlAuditStore.open(path, now=utc_now)
+    payload: dict[str, Any] = {
+        "type": DETACHED,
+        "segment": args.segment,
+        "file_digest": digest,
+        "detached_by": (args.approver or getpass.getuser()).strip(),
+        "reason": args.reason,
+    }
+    key = _seal_key()
+    if key is not None:
+        payload["auth"] = seal_tag(payload, key)
+    record = store.append(payload)
+    print(f"detached segment {args.segment} — recorded as {record.decision_id}")
+    return 0
+
+
+def _cmd_repair(args: argparse.Namespace) -> int:
+    """Trim a torn, unacknowledged final line (gated recovery)."""
+    path = _resolve_chain_path(args.chain)
+    try:
+        if not args.trim_torn_tail:
+            raise SystemExit("error: pass --trim-torn-tail to name the repair")
+        text = path.read_text(encoding="utf-8").splitlines()
+        tail = text[-1] if text else ""
+        try:
+            json.loads(tail)
+            print("Nothing to repair: the final line parses.")
+            return 0
+        except json.JSONDecodeError:
+            pass
+        print(f"torn final line ({len(tail)} bytes) would be discarded:")
+        print(f"  {tail[:200]}")
+        if not args.execute:
+            print("\nnothing changed — re-run with --execute")
+            return 0
+        if not args.yes:
+            if input("Discard this torn line? [y/N] ").strip().lower() != "y":
+                print("Aborted; nothing changed.")
+                return 1
+        discarded = trim_torn_tail(path)
+        print(f"trimmed {len(discarded or '')} bytes; re-verifying…")
+        JsonlAuditStore.open(path, for_append=False)
+        print("chain verifies green.")
+    except AuditIntegrityError as exc:
+        raise SystemExit(f"error: {exc}") from exc
+    return 0

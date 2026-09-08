@@ -138,11 +138,14 @@ def test_reason_is_mandatory(tmp_path: Path) -> None:
 
 
 def test_verify_reports_chain_health(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """ATB-05: verify defaults to the deep per-segment family table."""
     chain = tmp_path / "audit.jsonl"
     _seed_chain(chain)
     assert main(["--chain", str(chain), "verify"]) == 0
     out = capsys.readouterr().out
-    assert "Chain OK" in out and "1 pending" in out
+    assert "SEG" in out and "audit.jsonl" in out and "OK" in out
+    assert "tip: sha256:" in out
+    assert "FAILED" not in out
 
 
 def test_env_var_supplies_chain_path(

@@ -18,6 +18,20 @@ from atb.audit import AuditLog, AuditRecord, AuditSink
 from atb.catalog import CATALOG, resource_in_scope, scope_grants
 from atb.identity import IdentityAuthority, VerificationError
 
+#: Closed reason vocabulary for identity-verification failures. The chain is
+#: immutable, so only code-defined tokens may enter it — never exception text.
+_IDENTITY_REASONS = {
+    "unknown identity": "identity_invalid:unknown",
+    "signature mismatch": "identity_invalid:signature",
+    "identity revoked": "identity_invalid:revoked",
+    "identity expired": "identity_invalid:expired",
+}
+
+
+def _identity_reason(exc: VerificationError) -> str:
+    """Map a verification failure to a closed, chainable reason token."""
+    return _IDENTITY_REASONS.get(str(exc), "identity_invalid:unspecified")
+
 
 @runtime_checkable
 class ApprovalRegistry(Protocol):
@@ -86,7 +100,11 @@ class PolicyEngine:
         try:
             identity = self.authority.verify(token)
         except VerificationError as exc:
-            return Effect.DENY, f"identity_invalid: {exc}", True, "unverified"
+            # Closed reason vocabulary: exception text must never be
+            # interpolated into an immutable chained record. Today's
+            # verification messages are fixed strings, but the chain is
+            # forever — a future dynamic message would be unremovable.
+            return Effect.DENY, _identity_reason(exc), True, "unverified"
 
         subject = identity.subject
 

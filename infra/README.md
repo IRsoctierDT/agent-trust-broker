@@ -67,3 +67,44 @@ just be ignored by the gateway process.)
 
 macOS note: podman runs containers in a Linux VM (`podman machine`); this is
 fine for development, but the deployment target is the Linux lab host.
+
+## Rotating the chain (ATB-05)
+
+The chain grows forever and every queue operation replays the active segment,
+so rotate it periodically. Rotation is **human-run with the gateway stopped**
+(single-writer discipline, AGENTS.md §5.1), is crash-safe at every step, and
+**deletes nothing** — it seals the active segment into a read-only archive and
+opens a successor that chains to the sealed tip.
+
+```bash
+podman stop atb-gateway
+```
+
+```bash
+podman run --rm --entrypoint atb -v atb-chain:/var/lib/atb --network=none ianua-atb \
+  rotate --chain /var/lib/atb/audit-chain.jsonl
+```
+
+Review the dry run, then act, then verify and copy the archive off-box:
+
+```bash
+podman run --rm --entrypoint atb -v atb-chain:/var/lib/atb --network=none ianua-atb \
+  rotate --execute --yes --chain /var/lib/atb/audit-chain.jsonl
+```
+
+```bash
+podman run --rm --entrypoint atb -v atb-chain:/var/lib/atb --network=none ianua-atb \
+  verify --chain /var/lib/atb/audit-chain.jsonl
+```
+
+Then: copy `audit-chain.seg-NNNNNN.jsonl` off the volume, check `sha256sum`
+against the digest rotation printed, and **record the tip hash off-box** — it is
+the external trust anchor, checkable later with `atb verify --expect-tip <hash>`.
+Restart the gateway once the copy is confirmed.
+
+**Retention.** An archive may leave the volume only through `atb detach`, which
+requires a green deep verify and an operator-confirmed off-box copy and chains
+the authorization; a missing archive with no detach record fails every open.
+
+**Before your first rotation, upgrade every chain-touching binary** — a
+pre-ATB-05 gateway ignores a seal and would append past it.
