@@ -1,0 +1,25 @@
+name: release-please
+
+# Automated releases from Conventional Commits.
+# On each push to main (and on workflow_dispatch), release-please opens/updates a
+# release PR that bumps pyproject.toml / marked version lines + CHANGELOG.md.
+# Merging that PR tags the release and creates the GitHub Release.
+# Never hand-edit version numbers on feature branches.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

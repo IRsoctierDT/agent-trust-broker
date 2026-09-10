@@ -78,7 +78,7 @@ from atb.screening import (
 )
 
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_INFO = {"name": "ianua-atb-gateway", "version": "0.2.0"}
+SERVER_INFO = {"name": "ianua-atb-gateway", "version": "0.2.0"}  # x-release-please-version
 
 _PARSE_ERROR = -32700
 _METHOD_NOT_FOUND = -32601
