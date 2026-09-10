@@ -76,17 +76,17 @@ def _resolve_chain_path(chain: str | None) -> Path:
     return path
 
 
-def _open_queue(chain: str | None) -> EscalationQueue:
+def _open_queue(chain: str | None, *, for_append: bool = True) -> EscalationQueue:
     path = _resolve_chain_path(chain)
     try:
-        store = JsonlAuditStore.open(path)
+        store = JsonlAuditStore.open(path, for_append=for_append)
     except AuditIntegrityError as exc:
         raise SystemExit(f"error: audit chain FAILED verification — {exc}") from exc
     return EscalationQueue(log=store)
 
 
 def _cmd_pending(args: argparse.Namespace) -> int:
-    queue = _open_queue(args.chain)
+    queue = _open_queue(args.chain, for_append=False)
     pending = queue.pending()
     if not pending:
         print("No escalations awaiting approval (chain verified).")
@@ -99,20 +99,27 @@ def _cmd_pending(args: argparse.Namespace) -> int:
 
 def _resolve(args: argparse.Namespace, *, approved: bool) -> int:
     queue = _open_queue(args.chain)
-    approver = (args.approver or getpass.getuser()).strip()
     try:
-        record = queue.resolve(args.ref, approver=approver, approved=approved, reason=args.reason)
-    except EscalationError as exc:
-        raise SystemExit(f"error: {exc}") from exc
-    verdict = "APPROVED" if approved else "DENIED"
-    print(f"{verdict} {args.ref} by {approver} — recorded as {record.decision_id}")
-    if approved:
-        print("The approval is one-shot and bound to the escalated (agent, action, resource).")
-    return 0
+        approver = (args.approver or getpass.getuser()).strip()
+        try:
+            record = queue.resolve(
+                args.ref, approver=approver, approved=approved, reason=args.reason
+            )
+        except EscalationError as exc:
+            raise SystemExit(f"error: {exc}") from exc
+        verdict = "APPROVED" if approved else "DENIED"
+        print(f"{verdict} {args.ref} by {approver} — recorded as {record.decision_id}")
+        if approved:
+            print("The approval is one-shot and bound to the escalated (agent, action, resource).")
+        return 0
+    finally:
+        close = getattr(queue.log, "close", None)
+        if callable(close):
+            close()
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
-    queue = _open_queue(args.chain)  # open already verifies fail-closed
+    queue = _open_queue(args.chain, for_append=False)  # open already verifies fail-closed
     log = queue.log
     print(f"Chain OK: {len(log.records)} records, {len(queue.pending())} pending escalation(s).")
     return 0
@@ -174,7 +181,7 @@ def _release_lifecycle(
 
 def _cmd_show(args: argparse.Namespace) -> int:
     """Metadata-first triage: print one record's evidence, never a payload."""
-    queue = _open_queue(args.chain)
+    queue = _open_queue(args.chain, for_append=False)
     payload = _find_record(queue, args.ref).payload
     context = payload.get("context") or {}
     # Keys are code-defined labels; values (resource, reason, context) are
@@ -211,7 +218,7 @@ def _escape_untrusted(text: str) -> str:
 
 def _cmd_quarantine_show(args: argparse.Namespace) -> int:
     """Opt-in payload view: integrity-verified, escaped, skew-warned."""
-    queue = _open_queue(args.chain)
+    queue = _open_queue(args.chain, for_append=False)
     payload = _find_record(queue, args.ref).payload
     resource = str(payload.get("resource", ""))
     if not resource.startswith("quarantine:"):
@@ -254,7 +261,7 @@ def _cmd_quarantine_show(args: argparse.Namespace) -> int:
 
 def _cmd_screen_stats(args: argparse.Namespace) -> int:
     """Chain-derived per-rule telemetry: hits, releases, denies, release rate."""
-    queue = _open_queue(args.chain)
+    queue = _open_queue(args.chain, for_append=False)
     evidence: dict[str, list[str]] = {}
     hits: Counter[str] = Counter()
     agent_initiated = 0
@@ -311,7 +318,7 @@ def _cmd_quarantine_purge(args: argparse.Namespace) -> int:
     is pending or approved-but-unconsumed; orphan blobs and temp files are
     eligible (the flag remains provable from the chain).
     """
-    queue = _open_queue(args.chain)
+    queue = _open_queue(args.chain, for_append=False)
     root = _resolve_quarantine_dir(args.dir)
     submitted, resolved, consumed = _release_lifecycle(queue)
     blocked: set[str] = set()
@@ -593,8 +600,11 @@ def _cmd_detach(args: argparse.Namespace) -> int:
     key = _seal_key()
     if key is not None:
         payload["auth"] = seal_tag(payload, key)
-    record = store.append(payload)
-    print(f"detached segment {args.segment} — recorded as {record.decision_id}")
+    try:
+        record = store.append(payload)
+        print(f"detached segment {args.segment} — recorded as {record.decision_id}")
+    finally:
+        store.close()
     return 0
 
 

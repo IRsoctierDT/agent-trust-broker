@@ -267,13 +267,15 @@ the volume but lacks the key cannot mint a plausible seal or detach record.
 Verb: `atb rotate` (no flags = **dry run**: prints the plan, appends nothing) /
 `atb rotate --execute` (prompts; `--yes` for non-interactive runs). Precondition:
 gateway stopped — rotation lives inside the existing stop → resolve → restart
-loop; rotate additionally takes an exclusive advisory `flock` on the active file
-for its duration, which **serializes concurrent `rotate` invocations only**.
-Ordinary appenders do not take the lock (that would be a broker-wide change with
-its own risks), so a straggler writer is prevented *procedurally* by the
-gateway-stopped precondition and *detected* — not refused — by the
-seal-must-be-terminal check, replay `prev_hash` mismatch, and step 7's
-pre-commit byte-stability re-check. The dry run lists
+loop; rotate and every `JsonlAuditStore.open(..., for_append=True)` writer take an
+exclusive non-blocking advisory `flock` on a sidecar `.lock` file beside the
+active segment. A second writer fails closed with `AuditIntegrityError`
+(`another writer holds the audit lock`). Readers (`for_append=False`) do not
+take the lock. Writers release via `close()`. The gateway-stopped precondition
+for CLI resolve/rotate remains; the flock makes concurrent writers a hard
+refusal rather than a chain fork. Seal-must-be-terminal, replay `prev_hash`
+mismatch, and step 7's pre-commit byte-stability re-check remain as detection
+belts for any residual race. The dry run lists
 the carried state with ages; rotate **refuses** when the active segment holds no
 records beyond its checkpoint, and refuses when carried open state exceeds 256
 entries unless `--force-carry` is passed ("a checkpoint is not a landfill" —
@@ -579,9 +581,10 @@ print a size *warning* when the active segment is large (output, not action).
   artifact an attacker would edit.
 - **No carried closed state** — archives serve forensics; the checkpoint stays
   O(open state).
-- **No process-level multi-writer coordination beyond rotate's advisory lock** —
-  gateway-vs-CLI single-writer discipline remains procedural (stop → resolve →
-  restart), unchanged from M2.
+- **Writer lock is advisory and local-filesystem** — `fcntl.flock` on the
+  sidecar refuses a second `for_append=True` open fail-closed; gateway-vs-CLI
+  discipline is still stop → resolve → restart so the operator does not fight
+  the gateway for the lock. Network filesystems may not honor `flock`.
 
 ---
 

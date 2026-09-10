@@ -4,6 +4,8 @@ Identity issuance and Zero-Trust policy enforcement for the IANUA agent fleet.
 Reference implementation of PAT-0001 / EAODS-CTRL-000184 (see docs/).
 """
 
+__version__ = "0.2.0"
+
 from atb.audit import AuditLog
 from atb.bindings import ROLE_BINDINGS, RoleBinding
 from atb.catalog import CATALOG, ScopeSpec, validate_bindings
@@ -11,6 +13,7 @@ from atb.identity import DelegationError, Identity, IdentityAuthority, Verificat
 from atb.policy import Decision, PolicyEngine
 
 __all__ = [
+    "__version__",
     "CATALOG",
     "ROLE_BINDINGS",
     "AuditLog",

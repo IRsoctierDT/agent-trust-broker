@@ -26,7 +26,9 @@ from examples.mcp_gateway import (
 
 @pytest.fixture()
 def gateway() -> Gateway:
-    return Gateway(sink=AuditLog(), authority=IdentityAuthority(signing_key=b"test-only-key"))
+    return Gateway(
+        sink=AuditLog(), authority=IdentityAuthority(signing_key=b"test-only-key"), demo_mint=True
+    )
 
 
 def _mint(gateway: Gateway, role: str = "agent:soc-analyst") -> str:
@@ -135,3 +137,38 @@ def test_parse_request_survives_hostile_lines() -> None:
     assert _parse_request("not json") is None
     assert _parse_request('"a bare string"') is None
     assert _parse_request(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "x"})) is not None
+
+
+def test_mint_disabled_by_default() -> None:
+    """Production default: atb/mint is refused unless demo_mint is enabled."""
+    gw = Gateway(sink=AuditLog(), authority=IdentityAuthority(signing_key=b"test-only-key"))
+    response = gw.handle(
+        {"jsonrpc": "2.0", "id": 1, "method": "atb/mint", "params": {"role": "agent:soc-analyst"}}
+    )
+    assert response is not None and response["error"]["code"] == _INTERNAL_ERROR
+
+
+def test_declare_plan_and_divergence_escalates(gateway: Gateway) -> None:
+    """Declared plan allowlists tools; divergence escalates via atb:plan.override."""
+    token = _mint(gateway)
+    declared = gateway.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "atb/declare_plan",
+            "params": {"tools": ["log_read"], "_meta": {"atb_token": token}},
+        }
+    )
+    assert declared is not None
+    assert declared["result"]["tools"] == ["log_read"]
+    assert declared["result"]["audit_ref"].startswith("ATB-DEC-")
+
+    ok = _call(gateway, "log_read", {"name": "auth.jsonl"}, token)
+    assert ok["isError"] is False
+    assert ok["_meta"]["atb"]["effect"] == "allow"
+
+    diverged = _call(gateway, "report_write", {"name": "out.md"}, token)
+    assert diverged["isError"] is True
+    assert diverged["_meta"]["atb"]["effect"] == "escalate"
+    assert diverged["_meta"]["atb"]["reason"] == "plan_divergence"
+    assert diverged["_meta"]["atb"]["pending_ref"].startswith("ATB-DEC-")

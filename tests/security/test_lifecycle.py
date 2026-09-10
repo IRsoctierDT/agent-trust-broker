@@ -65,6 +65,9 @@ class Broker:
         self.reopen()
 
     def reopen(self) -> None:
+        prev = getattr(self, "store", None)
+        if prev is not None:
+            prev.close()
         self.store = JsonlAuditStore.open(self.chain, now=self.clock)
         self.queue = EscalationQueue(log=self.store)
         self.engine = PolicyEngine(authority=self.authority, log=self.store, approvals=self.queue)
@@ -218,6 +221,7 @@ def test_l6_interrupted_rotation_resumes(seeded: tuple[Broker, str], chain: Path
 
     payload = build_seal_payload(1, len(broker.store.records) + 1, expected, None)
     broker.store.append(payload)
+    broker.store.close()
 
     with pytest.raises(AuditIntegrityError, match="rotation incomplete"):
         JsonlAuditStore.open(chain)
@@ -516,6 +520,7 @@ def test_l24_torn_tail_vs_interior_corruption(chain: Path, clock: Clock) -> None
     store = JsonlAuditStore.open(chain, now=clock)
     store.append({"effect": "allow"})
     store.append({"effect": "deny"})
+    store.close()
     with chain.open("a", encoding="utf-8") as handle:
         handle.write('{"decision_id": "ATB-DEC-000003", "payl')  # torn write
     with pytest.raises(AuditIntegrityError, match="malformed or truncated"):

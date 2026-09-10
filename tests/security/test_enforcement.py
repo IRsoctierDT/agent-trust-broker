@@ -373,7 +373,8 @@ def test_enforcement_records_persist_and_reverify(
         ToolInvocation(token=token, tool="http_fetch", arguments={"url": "http://example.org/"})
     )
 
-    reloaded = JsonlAuditStore.open(chain)  # fail-closed re-verification on load
+    store.close()
+    reloaded = JsonlAuditStore.open(chain, for_append=False)  # fail-closed re-verification on load
     assert reloaded.verify_chain() is True
     assert len(reloaded.records) == len(store.records)
     assert len(EscalationQueue(log=reloaded).pending()) == 1

@@ -1,7 +1,7 @@
 # pyproject.toml — IANUA Agent Trust Broker (ATB)
 [project]
 name = "ianua-atb"
-version = "0.1.0"
+version = "0.2.0"
 description = "Identity issuance and Zero-Trust policy enforcement for the IANUA agent fleet."
 authors = [{ name = "Ivan Rozenblad" }]
 requires-python = ">=3.11"

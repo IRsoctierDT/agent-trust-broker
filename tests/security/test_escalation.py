@@ -138,6 +138,7 @@ def test_lifecycle_is_chained_and_persistent(authority: IdentityAuthority, tmp_p
     assert [p.ref for p in queue.pending()] == [ref]
 
     # Reload from disk: pending state is rebuilt purely from the chain.
+    store.close()
     reloaded_store = JsonlAuditStore.open(tmp_path / "audit.jsonl")
     reloaded_queue = EscalationQueue(log=reloaded_store)
     assert [p.ref for p in reloaded_queue.pending()] == [ref]
