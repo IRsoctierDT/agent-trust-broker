@@ -26,10 +26,13 @@ def _seed_chain(path: Path) -> str:
         signing_key=b"test-only-key", now=lambda: datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
     )
     store = JsonlAuditStore.open(path)
-    queue = EscalationQueue(log=store)
-    engine = PolicyEngine(authority=authority, log=store, approvals=queue)
-    _, token = authority.mint("agent:soc-analyst")
-    return queue.submit(engine.authorize(token, "net:egress", "host:intel.example"))
+    try:
+        queue = EscalationQueue(log=store)
+        engine = PolicyEngine(authority=authority, log=store, approvals=queue)
+        _, token = authority.mint("agent:soc-analyst")
+        return queue.submit(engine.authorize(token, "net:egress", "host:intel.example"))
+    finally:
+        store.close()
 
 
 def test_missing_chain_fails_closed(tmp_path: Path) -> None:

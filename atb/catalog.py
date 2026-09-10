@@ -47,6 +47,8 @@ _SPECS: tuple[ScopeSpec, ...] = (
     ScopeSpec("atb:policy.read", Risk.LOW, False, ("atb:policy",)),
     ScopeSpec("atb:audit.read", Risk.MEDIUM, False, ("atb:audit",)),
     ScopeSpec("atb:identity.mint", Risk.HIGH, False, ("atb:identity",)),
+    # Outbound plan divergence: always HITL; never role-bound (mirrors release).
+    ScopeSpec("atb:plan.override", Risk.CRITICAL, True, ("plan:*",)),
 )
 
 CATALOG: dict[str, ScopeSpec] = {spec.name: spec for spec in _SPECS}

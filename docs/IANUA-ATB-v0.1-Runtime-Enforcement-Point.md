@@ -318,6 +318,17 @@ and that LLM-expressed intent is treated as a request, never as authorization.
 
 ---
 
+## Amendment — Day-01 D3 plan MVP & demo mint gate (2026-09-10)
+
+- **Outbound plan declaration.** Agents may declare a closed MCP tool allowlist
+  via `atb/declare_plan` (`atb.plan.PlanBook`). Once declared for a subject,
+  any tool call outside the set is mediated through catalog scope
+  `atb:plan.override` (always escalates to HITL). Optional `ATB_REQUIRE_PLAN=1`
+  refuses calls until a plan exists (`plan_required`).
+- **Demo mint off by default.** The lab-only `atb/mint` JSON-RPC method is
+  refused unless the gateway is constructed with `demo_mint=True` or
+  `ATB_DEMO_MINT=1`. Production mints identities out of band.
+
 ## Recommended Next Logical Deliverable
 
 With enforcement fixed in design, the series returns to code:

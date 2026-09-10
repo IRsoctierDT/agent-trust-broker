@@ -492,7 +492,8 @@ def test_s14_chain_compatibility_and_exact_accounting(tmp_path: Path, clock: Clo
     assert released.effect is Effect.ALLOW  # +2 (approval_consumed + allow)
     assert len(store.records) == 8
 
-    reopened = JsonlAuditStore.open(chain)  # byte-identical replay or fail-closed
+    store.close()
+    reopened = JsonlAuditStore.open(chain, for_append=False)  # byte-identical replay or fail-closed
     assert reopened.verify_chain() is True
     assert len(reopened.records) == 8
     assert EscalationQueue(log=reopened).pending() == ()
@@ -582,7 +583,9 @@ def test_s18_envelope_oracle_closure() -> None:
     """S18: the wire envelope carries digest + ruleset + ref — never rule ids."""
     from examples.mcp_gateway import Gateway
 
-    gateway = Gateway(sink=AuditLog(), authority=IdentityAuthority(signing_key=b"test-only-key"))
+    gateway = Gateway(
+        sink=AuditLog(), authority=IdentityAuthority(signing_key=b"test-only-key"), demo_mint=True
+    )
     mint = gateway.handle(
         {"jsonrpc": "2.0", "id": 1, "method": "atb/mint", "params": {"role": "agent:soc-analyst"}}
     )
@@ -655,6 +658,7 @@ def test_s19_purge_safety(
     argv = ["--chain", str(chain), "quarantine", "--dir", str(quarantine_dir), "purge"]
 
     # Pending: blocked, no prompt, nothing deleted.
+    store.close()
     assert cli_main(argv) == 0
     assert "Nothing purge-eligible." in capsys.readouterr().out
     assert blob.is_file()
@@ -767,6 +771,7 @@ def test_cli_show_and_screen_stats(
         is Effect.ALLOW
     )
 
+    store.close()
     assert cli_main(["--chain", str(chain), "show", flagged.pending_ref]) == 0
     out = capsys.readouterr().out
     assert "context.screen_rules" in out and "rule ATB-R001" in out
@@ -929,7 +934,7 @@ def test_gateway_releases_binary_bytes_as_base64(authority: IdentityAuthority) -
     from examples.mcp_gateway import Gateway
 
     raw = b"\xff\xfe\x00\x01 binary secret"
-    gateway = Gateway(sink=AuditLog(), authority=authority)
+    gateway = Gateway(sink=AuditLog(), authority=authority, demo_mint=True)
     gateway.pep.downstream = lambda tool, arguments: raw
     mint = gateway.handle(
         {"jsonrpc": "2.0", "id": 1, "method": "atb/mint", "params": {"role": "agent:soc-analyst"}}
@@ -989,6 +994,7 @@ def test_quarantine_show_oversize_blob_labels_cause(
     flagged = pep.mediate(_log_read(token))
     assert store.records[-2].payload["context"]["screen_cause"] == "oversize"
 
+    store.close()
     assert (
         cli_main(
             [
@@ -1031,6 +1037,7 @@ def test_cli_show_escapes_untrusted_context(
         }
     )
     ref = store.records[-1].decision_id
+    store.close()
     assert cli_main(["--chain", str(chain), "show", ref]) == 0
     out = capsys.readouterr().out
     assert "\x1b" not in out and "\x07" not in out  # no raw escapes reach the terminal

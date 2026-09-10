@@ -517,7 +517,11 @@ def execute_rotation(
         pass
 
     # Step 9 — fail-closed self-test: the new head must reproduce the state.
-    reopened = JsonlAuditStore.open(active)
+    # Release the writer's exclusive lock first; the sealed store must not append,
+    # and the self-test is a read-only replay of the successor.
+    if hasattr(store, "close"):
+        store.close()
+    reopened = JsonlAuditStore.open(active, for_append=False)
     derived = derive_carried_state(reopened.records)
     if derived != plan.carried:
         raise LifecycleError(

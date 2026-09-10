@@ -46,6 +46,7 @@ from urllib.parse import urlsplit
 
 from atb.catalog import CATALOG
 from atb.escalation import EscalationQueue
+from atb.plan import PlanBook, PlanError
 from atb.policy import Decision, Effect, PolicyEngine
 from atb.screening import (
     RELEASE_ACTION,
@@ -58,6 +59,7 @@ from atb.screening import (
 )
 
 REFUSAL = "enforcement_refusal"
+PLAN_OVERRIDE_ACTION = "atb:plan.override"
 
 # The exact resource shape a release approval is triple-bound to.
 _QUARANTINE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -90,6 +92,13 @@ class ToolRule:
 
     action: str
     derive: Deriver
+
+
+@dataclass(frozen=True)
+class DeclaredPlanResult:
+    subject: str
+    tools: frozenset[str]
+    audit_ref: str
 
 
 @dataclass(frozen=True)
@@ -258,10 +267,41 @@ class PolicyEnforcementPoint:
     # is no disable flag — weakening it is a code change through review.
     screener: ResponseScreener = field(default_factory=ResponseScreener)
     quarantine: QuarantineStore = field(default_factory=MemoryQuarantineStore)
+    plans: PlanBook = field(default_factory=PlanBook)
 
     def __post_init__(self) -> None:
         # A custom map is a governed change; it meets the same T11 bar.
         validate_tool_map(self.tool_map)
+
+    def declare_plan(self, token: str, tools: list[str]) -> DeclaredPlanResult:
+        """Verify identity and replace the subject's outbound tool plan."""
+        from atb.identity import VerificationError
+
+        try:
+            identity = self.engine.authority.verify(token)
+        except VerificationError as exc:
+            raise PlanError(f"identity_invalid:{exc}") from exc
+        plan = self.plans.declare(
+            identity.subject,
+            tools,
+            known_tools=frozenset(self.tool_map),
+        )
+        record = self.engine.log.append(
+            {
+                "subject": identity.subject,
+                "action": "atb:plan.declare",
+                "resource": "plan:" + ",".join(sorted(plan.tools)),
+                "effect": "allow",
+                "reason": "plan_declared",
+                "security_event": False,
+                "context": {"tools": ",".join(sorted(plan.tools))},
+            }
+        )
+        return DeclaredPlanResult(
+            subject=plan.subject,
+            tools=frozenset(plan.tools),
+            audit_ref=record.decision_id,
+        )
 
     def mediate(self, invocation: ToolInvocation) -> MediationResult:
         """Mediate one tool call; every path is audited and fails closed."""
@@ -276,6 +316,41 @@ class PolicyEnforcementPoint:
 
         if rule.action == RELEASE_ACTION:
             return self._mediate_release(invocation, resource, context)
+
+        # Outbound plan check (Day-01 D3 MVP): divergence escalates to HITL.
+        subject = self._subject_or_empty(invocation.token)
+        diverge = (
+            self.plans.check(subject, invocation.tool)
+            if subject
+            else ("plan_required" if self.plans.require_plan else None)
+        )
+        if diverge == "plan_required":
+            return self._refuse(invocation.tool, "plan_required")
+        if diverge == "plan_divergence":
+            decision = self.engine.authorize(
+                invocation.token,
+                PLAN_OVERRIDE_ACTION,
+                f"plan:{invocation.tool}",
+                context,
+            )
+            if decision.effect is Effect.ESCALATE:
+                pending_ref = self.queue.submit(decision)
+                return MediationResult(
+                    forwarded=False,
+                    effect=Effect.ESCALATE,
+                    reason="plan_divergence",
+                    audit_ref=decision.audit.decision_id,
+                    security_event=True,
+                    pending_ref=pending_ref,
+                )
+            # Unexpected allow/deny still bind — never silently forward.
+            return MediationResult(
+                forwarded=False,
+                effect=decision.effect,
+                reason=f"plan_divergence:{decision.reason}",
+                audit_ref=decision.audit.decision_id,
+                security_event=True,
+            )
 
         decision = self.engine.authorize(invocation.token, rule.action, resource, context)
         if decision.effect is Effect.ALLOW:
@@ -466,6 +541,15 @@ class PolicyEnforcementPoint:
             audit_ref=record.decision_id,
             security_event=True,
         )
+
+    def _subject_or_empty(self, token: str) -> str:
+        """Return verified subject, or empty string on any verification failure."""
+        from atb.identity import VerificationError
+
+        try:
+            return self.engine.authority.verify(token).subject
+        except VerificationError:
+            return ""
 
     def _refuse(self, tool: str, reason: str) -> MediationResult:
         """Refuse pre-decision; append the call's single chained record.

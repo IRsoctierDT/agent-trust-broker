@@ -28,9 +28,10 @@ EAODS reference implementation of **PAT-0001 (Zero Trust Service Identity)** and
 | `atb.identity` | Mint / verify / revoke; depth-1 attenuating delegation; cascade revocation |
 | `atb.policy` | Deterministic authorize → allow / deny / escalate; always audited |
 | `atb.audit` | Append-only, hash-chained decision log with chain verification |
-| `atb.persistence` | Durable JSONL audit storage; chain re-verified fail-closed on load |
+| `atb.persistence` | Durable JSONL audit storage; chain re-verified fail-closed on load; exclusive writer lock |
 | `atb.escalation` | Persistent escalation queue; human approve/deny recorded in the chain |
 | `atb.enforcement` | ATB-03 PEP: closed-world tool map; forward / screen / refuse / escalate mediation |
+| `atb.plan` | Outbound tool-plan declaration / divergence MVP (Day-01 D3); HITL override scope |
 | `atb.screening` | ATB-04 response screener: versioned closed-world ruleset; content-addressed quarantine stores |
 | `atb.lifecycle` | ATB-05 chain lifecycle: segments, seals/checkpoints, crash-safe rotation, deep verification |
 | `atb.cli` | Operator CLI (`atb pending / show / approve / deny / verify / rotate / detach / repair / screen-stats / quarantine`) |

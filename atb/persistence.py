@@ -17,6 +17,7 @@ failure.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from dataclasses import dataclass
@@ -57,6 +58,7 @@ class JsonlAuditStore:
     path: Path
     log: AuditLog
     sealed: bool = False
+    _lock_fd: Any = None
 
     @classmethod
     def open(
@@ -81,7 +83,10 @@ class JsonlAuditStore:
                 )
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch()
-            return cls(path=path, log=AuditLog(now=now), sealed=False)
+            store = cls(path=path, log=AuditLog(now=now), sealed=False)
+            if for_append:
+                store._acquire_lock()
+            return store
 
         persisted_records = cls._read_records(path)
         head = None
@@ -102,7 +107,10 @@ class JsonlAuditStore:
             raise AuditIntegrityError(
                 f"{path}: rotation incomplete (segment is sealed) — run `atb rotate --execute`"
             )
-        return cls(path=path, log=log, sealed=sealed)
+        store = cls(path=path, log=log, sealed=sealed)
+        if for_append:
+            store._acquire_lock()
+        return store
 
     # ------------------------------------------------------------ loading
     @staticmethod
@@ -193,6 +201,25 @@ class JsonlAuditStore:
             handle.flush()
             os.fsync(handle.fileno())
         return record
+
+    def _acquire_lock(self) -> None:
+        lock_path = self.path.with_name(self.path.name + ".lock")
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            raise AuditIntegrityError(f"{self.path}: another writer holds the audit lock") from None
+        self._lock_fd = fd
+
+    def close(self) -> None:
+        fd = self._lock_fd
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+                self._lock_fd = None
 
 
 def trim_torn_tail(path: Path) -> str | None:

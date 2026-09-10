@@ -12,16 +12,19 @@ from atb.persistence import AuditIntegrityError, JsonlAuditStore
 
 def _seed(path: Path) -> None:
     store = JsonlAuditStore.open(path)
-    store.append({"subject": "agent:soc-analyst", "effect": "allow", "reason": "test"})
-    store.append({"subject": "agent:soc-analyst", "effect": "deny", "reason": "test"})
-    store.append({"subject": "agent:orchestrator", "effect": "escalate", "reason": "test"})
+    try:
+        store.append({"subject": "agent:soc-analyst", "effect": "allow", "reason": "test"})
+        store.append({"subject": "agent:soc-analyst", "effect": "deny", "reason": "test"})
+        store.append({"subject": "agent:orchestrator", "effect": "escalate", "reason": "test"})
+    finally:
+        store.close()
 
 
 def test_clean_reload_verifies(tmp_path: Path) -> None:
     """A faithfully persisted chain reloads and verifies."""
     path = tmp_path / "audit.jsonl"
     _seed(path)
-    store = JsonlAuditStore.open(path)
+    store = JsonlAuditStore.open(path, for_append=False)
     assert len(store.log.records) == 3
     assert store.log.verify_chain() is True
 
@@ -82,3 +85,25 @@ def test_garbage_line_fails_closed(tmp_path: Path) -> None:
     path.write_text('{"decision_id": "ATB-DEC-000001"}\n')  # valid JSON, missing fields
     with pytest.raises(AuditIntegrityError, match="malformed or truncated"):
         JsonlAuditStore.open(path)
+
+
+def test_concurrent_writer_lock_fails_closed(tmp_path: Path) -> None:
+    """A second for_append writer is refused while the first holds the lock."""
+    path = tmp_path / "audit.jsonl"
+    writer = JsonlAuditStore.open(path)
+    try:
+        writer.append({"subject": "agent:soc-analyst", "effect": "allow", "reason": "held"})
+        with pytest.raises(AuditIntegrityError, match="another writer holds the audit lock"):
+            JsonlAuditStore.open(path)
+        # Readers must not take the exclusive lock.
+        reader = JsonlAuditStore.open(path, for_append=False)
+        assert len(reader.records) == 1
+    finally:
+        writer.close()
+    # After release, a new writer may open.
+    again = JsonlAuditStore.open(path)
+    try:
+        again.append({"subject": "agent:soc-analyst", "effect": "deny", "reason": "after"})
+        assert len(again.records) == 2
+    finally:
+        again.close()

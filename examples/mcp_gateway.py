@@ -36,12 +36,17 @@ Configuration (environment; see ``.env.example``):
   ``ATB_QUARANTINE_BUDGET_BYTES`` — screening and quarantine bounds; all
   parsed fail-closed (an invalid value refuses to start). Screening itself
   has **no off switch**: disabling it is a code change through review.
+- ``ATB_DEMO_MINT`` — set to ``1`` to enable the lab-only ``atb/mint``
+  method. Unset/any other value: ``atb/mint`` is refused (production default).
+- ``ATB_REQUIRE_PLAN`` — set to ``1`` to require an ``atb/declare_plan``
+  before any ``tools/call``. Unset: plans are optional until declared;
+  once declared, divergence escalates to HITL.
 
 Security considerations: tokens are read from ``_meta`` and passed only to
 the policy engine — never logged, never echoed. A missing or malformed
-token simply fails verification (deny, ``identity_invalid``). The demo
-``atb/mint`` method exists so the example is drivable by hand; a production
-deployment mints identities out of band and removes it.
+token simply fails verification (deny, ``identity_invalid``). Demo
+``atb/mint`` is **off by default**; enable only for local labs via
+``ATB_DEMO_MINT=1``. Production mints identities out of band.
 """
 
 from __future__ import annotations
@@ -73,7 +78,7 @@ from atb.screening import (
 )
 
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_INFO = {"name": "ianua-atb-gateway", "version": "0.1.0"}
+SERVER_INFO = {"name": "ianua-atb-gateway", "version": "0.2.0"}
 
 _PARSE_ERROR = -32700
 _METHOD_NOT_FOUND = -32601
@@ -119,16 +124,23 @@ class Gateway:
         authority: IdentityAuthority,
         screener: ResponseScreener | None = None,
         quarantine: QuarantineStore | None = None,
+        *,
+        demo_mint: bool = False,
+        require_plan: bool = False,
     ) -> None:
         self.authority = authority
+        self.demo_mint = demo_mint
         self.queue = EscalationQueue(log=sink)
         engine = PolicyEngine(authority=authority, log=sink, approvals=self.queue)
+        from atb.plan import PlanBook
+
         self.pep = PolicyEnforcementPoint(
             engine=engine,
             queue=self.queue,
             downstream=_lab_downstream,
             screener=screener if screener is not None else ResponseScreener(),
             quarantine=quarantine if quarantine is not None else MemoryQuarantineStore(),
+            plans=PlanBook(require_plan=require_plan),
         )
 
     # ------------------------------------------------------------ methods
@@ -232,7 +244,9 @@ class Gateway:
         }
 
     def _mint(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Demo-only identity minting so the gateway is drivable by hand."""
+        """Lab-only identity minting — refused unless ``demo_mint`` is enabled."""
+        if not self.demo_mint:
+            raise PermissionError("atb/mint disabled (set ATB_DEMO_MINT=1 for lab demos only)")
         role = _str_or_empty(params.get("role")) or "agent:soc-analyst"
         identity, token = self.authority.mint(role)
         return {
@@ -241,6 +255,25 @@ class Gateway:
             "not_after": identity.not_after.isoformat(),
             "scopes": sorted(identity.scopes),
             "token": token,
+        }
+
+    def _declare_plan(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Declare the outbound tool allowlist for the caller's subject."""
+        meta = _dict_or_empty(params.get("_meta"))
+        token = _str_or_empty(meta.get("atb_token"))
+        tools = params.get("tools")
+        if not isinstance(tools, list):
+            raise ValueError("tools must be a list of tool names")
+        from atb.plan import PlanError
+
+        try:
+            declared = self.pep.declare_plan(token, tools)
+        except PlanError as exc:
+            raise ValueError(str(exc)) from exc
+        return {
+            "subject": declared.subject,
+            "tools": sorted(declared.tools),
+            "audit_ref": declared.audit_ref,
         }
 
     # ------------------------------------------------------------ dispatch
@@ -260,6 +293,8 @@ class Gateway:
                 result = self._tools_call(params)
             elif method == "atb/mint":
                 result = self._mint(params)
+            elif method == "atb/declare_plan":
+                result = self._declare_plan(params)
             else:
                 return _error(request_id, _METHOD_NOT_FOUND, f"unknown method: {method!r}")
         except Exception as exc:  # one bad request must not kill the session
@@ -389,6 +424,8 @@ def main() -> int:
         authority=_build_authority(),
         screener=_build_screener(),
         quarantine=_build_quarantine(),
+        demo_mint=os.environ.get("ATB_DEMO_MINT", "").strip() == "1",
+        require_plan=os.environ.get("ATB_REQUIRE_PLAN", "").strip() == "1",
     )
     for line in sys.stdin:
         line = line.strip()
