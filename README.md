@@ -18,6 +18,7 @@ EAODS reference implementation of **PAT-0001 (Zero Trust Service Identity)** and
 | [ATB-03](docs/IANUA-ATB-v0.1-Runtime-Enforcement-Point.md) | Runtime enforcement point (PEP), tool-call mediation, closed-world tool map |
 | [ATB-04](docs/IANUA-ATB-v0.1-Response-Screening-and-Quarantine.md) | Tool-response screening, quarantine, human release loop (screening as input, never authority) |
 | [ATB-05](docs/IANUA-ATB-v0.1-Audit-Chain-Lifecycle.md) | Audit-chain lifecycle: segment rotation, checkpointing, chained time, deep verification |
+| [ROADMAP](docs/ROADMAP.md) | Residual → spawn queue: what to build next from Known Residuals / Non-Goals |
 
 ## Package
 
