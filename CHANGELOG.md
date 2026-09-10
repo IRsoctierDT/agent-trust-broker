@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (0.x minors may include additive security features).
 
+## [Unreleased]
+
+### Documentation
+
+- Add `docs/ROADMAP.md`: living residual → build spawn map (P0 identity revocation, keyed-seal posture, Milestone 6 keys; P1 screener corpus / quarantine flood / evidence masks).
+
 ## [0.2.0] — 2026-09-10
 
 ### Added
